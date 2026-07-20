@@ -72,7 +72,7 @@ func NewPeerManager(cfg Config) (*PeerManager, error) {
 	se.SetHostAcceptanceMinWait(0)
 	// Força candidatos host com IPs da LAN (iPhone na mesma Wi‑Fi).
 	if ips := lanIPv4s(); len(ips) > 0 {
-		_ = se.SetNAT1To1IPs(ips, webrtc.ICECandidateTypeHost)
+		se.SetNAT1To1IPs(ips, webrtc.ICECandidateTypeHost)
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
