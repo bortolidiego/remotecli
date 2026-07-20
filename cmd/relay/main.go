@@ -149,6 +149,7 @@ type ShareCmd struct {
 	QROut     string `help:"Caminho do PNG QR. Default: relay-pair-<sessao>.png no cwd."`
 	NoTunnel  bool   `help:"Não inicia o tunnel mesmo que configurado."`
 	NoStart   bool   `help:"Não sobe o agente se ele estiver parado; erro claro."`
+	NoOpen    bool   `help:"Não abre o PNG do QR no Preview (padrão: abre no macOS para escanear fácil)."`
 }
 
 func (s *ShareCmd) Run(ctx *kong.Context) error {
@@ -234,12 +235,26 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	fmt.Println()
 	fmt.Println("Escaneie com o celular (mesma Wi‑Fi):")
 	fmt.Println()
-	if err := printQRTerminal(qrURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Aviso: não foi possível desenhar o QR no terminal: %v\n", err)
+	// No Maestri/chat o QR em caracteres vira bloco cinza ilegível — no Terminal.app real fica ok.
+	// Sempre geramos PNG e, no macOS, abrimos o Preview para escaneamento confiável.
+	if isInteractiveTerminal() {
+		if err := printQRTerminal(qrURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Aviso: QR no terminal falhou: %v\n", err)
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("(Terminal sem suporte visual ao QR — use o PNG ou o link abaixo.)")
+		fmt.Println()
 	}
-	fmt.Println()
+	if !s.NoOpen {
+		if err := openQRImage(qrPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Aviso: não abri o PNG automaticamente: %v\n", err)
+		} else {
+			fmt.Println("QR aberto em janela (Preview) — escaneie essa imagem.")
+		}
+	}
 	fmt.Printf("Link: %s\n", qrURL)
-	fmt.Printf("PNG (opcional): %s\n", qrPath)
+	fmt.Printf("Arquivo: %s\n", qrPath)
 	fmt.Println("Oferta expira em 2 minutos. No iPhone: aceite o certificado HTTPS e toque em Parear.")
 	return nil
 }
@@ -614,19 +629,52 @@ func writeQRCode(path, payload string) error {
 	return qrcode.WriteFile(payload, qrcode.Medium, 320, path)
 }
 
-// printQRTerminal desenha o QR no próprio CLI (sem abrir Preview/Finder).
+// printQRTerminal desenha o QR com módulos largos (██ / espaços) — legível no Terminal.app.
+// Observação: o chat do Maestri/Grok costuma “amassar” esses caracteres; use o PNG nesses casos.
 func printQRTerminal(content string) error {
 	if content == "" {
 		return fmt.Errorf("conteúdo QR vazio")
 	}
-	q, err := qrcode.New(content, qrcode.Medium)
+	// Low = menos módulos; link curto (?c=XXXX) já reduz o tamanho.
+	q, err := qrcode.New(content, qrcode.Low)
 	if err != nil {
 		return err
 	}
 	q.DisableBorder = false
-	// ToSmallString usa meia-altura — cabe melhor no terminal do celular/CLI.
-	fmt.Print(q.ToSmallString(false))
+	bitmap := q.Bitmap()
+	// quiet zone extra + módulo 2 colunas de largura (mais fácil de focar a câmera)
+	for _, row := range bitmap {
+		var b strings.Builder
+		for _, black := range row {
+			if black {
+				b.WriteString("██")
+			} else {
+				b.WriteString("  ")
+			}
+		}
+		fmt.Println(b.String())
+	}
 	return nil
+}
+
+func isInteractiveTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func openQRImage(path string) error {
+	if path == "" {
+		return fmt.Errorf("caminho vazio")
+	}
+	// macOS: Preview; em outros SO só deixa o arquivo no disco.
+	if _, err := exec.LookPath("open"); err != nil {
+		return err
+	}
+	cmd := exec.Command("open", path)
+	return cmd.Start()
 }
 
 func buildOfferURL(endpoint string, envelope []byte) string {
