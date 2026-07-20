@@ -194,14 +194,13 @@ func (r *Registry) Pair(req *contracts.PairRequest) (*contracts.PairResponse, *D
 	if !r.consumeNonce(req.Nonce) {
 		return nil, nil, errors.New("nonce inválido, expirado ou reutilizado")
 	}
-	if len(r.devices) >= MaxDevices {
-		return nil, nil, fmt.Errorf("limite de %d dispositivos atingido", MaxDevices)
-	}
 	if req.DeviceID == "" || req.Name == "" || len(req.ClientKey) == 0 || len(req.ClientECDH) == 0 || len(req.ClientSignature) == 0 {
 		return nil, nil, errors.New("dados de emparelhamento incompletos")
 	}
-	if _, exists := r.devices[req.DeviceID]; exists {
-		return nil, nil, errors.New("device_id já emparelhado")
+	_, rePair := r.devices[req.DeviceID]
+	// Re-parear o mesmo celular é permitido (Desconectar + QR novo). Só conta no limite se for device novo.
+	if !rePair && len(r.devices) >= MaxDevices {
+		return nil, nil, fmt.Errorf("limite de %d dispositivos atingido", MaxDevices)
 	}
 	challenge, err := contracts.BuildPairChallenge(*req)
 	if err != nil {
