@@ -93,7 +93,8 @@ func (r *Registry) HostName() string { return r.hostName }
 
 func (r *Registry) BasePath() string { return r.basePath }
 
-// LANEndpoint transforma "host:port" em URL acessível na LAN.
+// LANEndpoint transforma "host:port" em URL HTTPS acessível na LAN.
+// HTTPS é obrigatório no iPhone para WebCrypto (crypto.subtle).
 func LANEndpoint(addr string) string {
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -103,7 +104,7 @@ func LANEndpoint(addr string) string {
 	if ip == "" {
 		ip = "127.0.0.1"
 	}
-	return fmt.Sprintf("http://%s:%s", ip, port)
+	return fmt.Sprintf("https://%s:%s", ip, port)
 }
 
 func localIP() string {

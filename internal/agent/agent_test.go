@@ -25,6 +25,7 @@ func startTestAgentWithTunnel(t *testing.T, tunCfg tunnel.Config) *Agent {
 	runner := &fakeTunnelRunner{}
 	ag, err := New(Config{
 		Addr:         "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID:    "test-sess-" + t.Name(),
 		HostName:     "test-host",
 		BasePath:     t.TempDir(),
@@ -98,6 +99,7 @@ func TestLocalTokenPersistedInStore(t *testing.T) {
 	store := keychain.NewFakeStore()
 	ag1, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "persisted-token",
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),
@@ -108,6 +110,7 @@ func TestLocalTokenPersistedInStore(t *testing.T) {
 
 	ag2, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "persisted-token",
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),

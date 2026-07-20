@@ -132,6 +132,7 @@ func readBody(resp *http.Response) []byte {
 func TestIPCStartedOnAgentStart(t *testing.T) {
 	ag, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "test-ipc-" + t.Name(),
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/bortolidiego/relay/internal/keychain"
 	"github.com/bortolidiego/relay/internal/pairing"
 	"github.com/bortolidiego/relay/internal/sandbox"
+	"github.com/bortolidiego/relay/internal/tlsutil"
 	"github.com/bortolidiego/relay/internal/tunnel"
 	"github.com/bortolidiego/relay/internal/web"
 	"github.com/bortolidiego/relay/shared/contracts"
@@ -53,6 +55,9 @@ type Agent struct {
 
 	codexManager *codex.Manager
 	codexMu      sync.RWMutex
+
+	// disableTLS força HTTP (apenas testes). Em produção o agente usa HTTPS local.
+	disableTLS bool
 }
 
 // New cria o agente, carregando ou criando identidade no Keychain.
@@ -98,6 +103,7 @@ func New(cfg Config) (*Agent, error) {
 		sessionID:    cfg.SessionID,
 		basePath:     cfg.BasePath,
 		localToken:   localToken,
+		disableTLS:   cfg.DisableTLS,
 		stopped:      make(chan struct{}),
 		tunnel:        tun,
 		tunnelConfig:  cfg.Tunnel,
@@ -236,6 +242,8 @@ type Config struct {
 	Metadata      contracts.SessionMetadata
 	Tunnel        tunnel.Config
 	TunnelRunner  tunnel.ProcessRunner
+	// DisableTLS usa HTTP puro (testes unitários). O serve de produção usa HTTPS.
+	DisableTLS bool
 }
 
 func (a *Agent) ListenAddr() string {
@@ -282,6 +290,7 @@ func (a *Agent) TunnelConfig() tunnel.Config {
 }
 
 // Start inicia o agente em background. Se o tunnel estiver habilitado e tiver token, inicia-o também.
+// Por padrão serve HTTPS com certificado local em ~/.relay/tls (necessário para WebCrypto no iPhone).
 func (a *Agent) Start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -291,6 +300,19 @@ func (a *Agent) Start() error {
 	lis, err := net.Listen("tcp", a.addr)
 	if err != nil {
 		return err
+	}
+	if !a.disableTLS {
+		cert, err := tlsutil.EnsureLocalCert("")
+		if err != nil {
+			_ = lis.Close()
+			return fmt.Errorf("certificado TLS local: %w", err)
+		}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		lis = tls.NewListener(lis, tlsCfg)
+		log.Printf("relay TLS ativo (cert: %s)", tlsutil.DescribePaths())
 	}
 	a.listener = lis
 	a.running = true

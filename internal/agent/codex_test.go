@@ -99,6 +99,7 @@ func TestCodexTurnEndpoint(t *testing.T) {
 	codexThreadID := "thread-xyz"
 	ag, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "codex-turn-test",
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),
@@ -142,6 +143,7 @@ func TestCodexInterruptEndpoint(t *testing.T) {
 	codexThreadID := "thread-interrupt"
 	ag, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "codex-interrupt-test",
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),
@@ -192,6 +194,7 @@ func TestCodexEventsAndApprovalsEndpoints(t *testing.T) {
 	codexThreadID := "thread-events"
 	ag, err := New(Config{
 		Addr:      "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID: "codex-events-test",
 		HostName:  "test-host",
 		BasePath:  t.TempDir(),

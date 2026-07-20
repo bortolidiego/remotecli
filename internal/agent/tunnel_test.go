@@ -173,6 +173,7 @@ func TestAgentStartWarnsWithoutCloudflared(t *testing.T) {
 	cfg := tunnel.Config{Enabled: true, Token: "tok"}
 	ag, err := New(Config{
 		Addr:         "127.0.0.1:0",
+		DisableTLS: true,
 		SessionID:    "test-sess-cloudflared-missing",
 		HostName:     "test-host",
 		BasePath:     t.TempDir(),

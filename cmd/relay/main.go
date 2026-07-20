@@ -8,9 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,6 +21,7 @@ import (
 	"github.com/bortolidiego/relay/internal/agent"
 	"github.com/bortolidiego/relay/internal/keychain"
 	"github.com/bortolidiego/relay/internal/pairing"
+	"github.com/bortolidiego/relay/internal/tlsutil"
 	"github.com/bortolidiego/relay/internal/tunnel"
 	"github.com/bortolidiego/relay/shared/contracts"
 	qrcode "github.com/skip2/go-qrcode"
@@ -224,10 +225,11 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	fmt.Println(string(env.Payload))
 	fmt.Printf("QR local one-time: %s\n", qrPath)
 	fmt.Printf("URL do QR expira em 2 minutos. Endpoint: %s\n", offer.Endpoint)
+	fmt.Println("No iPhone: aceite o aviso de certificado (HTTPS local) e toque em Parear.")
 	if ip := localIP(); ip != "" {
-		fmt.Printf("Abra no celular (mesma rede): http://%s:24109\n", ip)
+		fmt.Printf("Abra no celular (mesma rede): https://%s:24109\n", ip)
 	} else {
-		fmt.Printf("Abra no celular: http://127.0.0.1:24109\n")
+		fmt.Printf("Abra no celular: https://127.0.0.1:24109\n")
 	}
 	return nil
 }
@@ -320,13 +322,28 @@ func (r *RevokeCmd) Run(ctx *kong.Context) error {
 	return nil
 }
 
+// localHTTPClient aceita o certificado autoassinado do agente (só CLI ↔ localhost/LAN).
+func localHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsutil.InsecureTLSConfig(),
+		},
+	}
+}
+
+func agentBaseURL(addr string) string {
+	// Cliente sempre HTTPS (agente de produção). Testes unitários não usam estas helpers.
+	return "https://" + addr
+}
+
 func getAgent(addr, path, localToken string) ([]byte, error) {
-	url := "http://" + addr + path
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	u := agentBaseURL(addr) + path
+	req, _ := http.NewRequest(http.MethodGet, u, nil)
 	if localToken != "" {
 		req.Header.Set("X-Relay-Local-Token", localToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := localHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("agente não responde em %s: %w", addr, err)
 	}
@@ -342,17 +359,17 @@ func getAgent(addr, path, localToken string) ([]byte, error) {
 }
 
 func postAgent(addr, path string, data []byte, localToken string) ([]byte, error) {
-	url := "http://" + addr + path
+	u := agentBaseURL(addr) + path
 	var body io.Reader
 	if data != nil {
 		body = strings.NewReader(string(data))
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, body)
+	req, _ := http.NewRequest(http.MethodPost, u, body)
 	req.Header.Set("Content-Type", "application/json")
 	if localToken != "" {
 		req.Header.Set("X-Relay-Local-Token", localToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := localHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -448,8 +465,13 @@ func defaultAgentStart(selfExe, sessionID string) (*os.Process, error) {
 }
 
 func defaultAgentHealthy(addr string) bool {
-	client := http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get("http://" + addr + "/health")
+	client := &http.Client{
+		Timeout: 800 * time.Millisecond,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsutil.InsecureTLSConfig(),
+		},
+	}
+	resp, err := client.Get(agentBaseURL(addr) + "/health")
 	if err != nil {
 		return false
 	}
@@ -489,7 +511,7 @@ func ensureLocalToken(override, sessionID string, store keychain.Store, timeout 
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if agentHealthy("127.0.0.1:24109") {
+	if agentHealthy(clientAddr("0.0.0.0:24109")) {
 		return "", fmt.Errorf("agente já está no ar com outra sessão; rode: relay stop && relay share")
 	}
 	return "", fmt.Errorf("token local não encontrado no Keychain para %s", sessionID)
