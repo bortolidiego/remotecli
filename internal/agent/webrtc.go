@@ -204,16 +204,15 @@ func (a *Agent) RegisterWebRTCRoutes(pm *PeerManager) {
 			http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 			return
 		}
+		// Lease/device vêm dos headers (requireLease); o body só carrega SDP/ICE.
+		deviceID := r.Header.Get("X-Relay-Device-ID")
+		lease := r.Header.Get("X-Relay-Lease-Token")
 		var req WebRTCSignalingPayload
 		if err := readJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if !a.registry.ValidateLease(req.Lease, req.DeviceID) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "lease inválido"})
-			return
-		}
-		dev, ok := a.registry.GetDevice(req.DeviceID)
+		dev, ok := a.registry.GetDevice(deviceID)
 		if !ok {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "device não encontrado"})
 			return
@@ -223,7 +222,9 @@ func (a *Agent) RegisterWebRTCRoutes(pm *PeerManager) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "sessão compartilhada não encontrada; reconecte o lease"})
 			return
 		}
-		mgr, err := pm.CreatePeerForLease(req.DeviceID, req.Lease, sess.SharedKey)
+		// Re-cria peer a cada offer (re-connect do celular).
+		pm.ReleasePeer(deviceID)
+		mgr, err := pm.CreatePeerForLease(deviceID, lease, sess.SharedKey)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -250,16 +251,13 @@ func (a *Agent) RegisterWebRTCRoutes(pm *PeerManager) {
 			http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 			return
 		}
+		deviceID := r.Header.Get("X-Relay-Device-ID")
 		var req WebRTCSignalingPayload
 		if err := readJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if !a.registry.ValidateLease(req.Lease, req.DeviceID) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "lease inválido"})
-			return
-		}
-		mgr, ok := pm.GetPeer(req.DeviceID)
+		mgr, ok := pm.GetPeer(deviceID)
 		if !ok || req.SDP == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "peer ou SDP ausente"})
 			return
@@ -276,18 +274,16 @@ func (a *Agent) RegisterWebRTCRoutes(pm *PeerManager) {
 			http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 			return
 		}
+		deviceID := r.Header.Get("X-Relay-Device-ID")
 		var req WebRTCSignalingPayload
 		if err := readJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if !a.registry.ValidateLease(req.Lease, req.DeviceID) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "lease inválido"})
-			return
-		}
-		mgr, ok := pm.GetPeer(req.DeviceID)
+		mgr, ok := pm.GetPeer(deviceID)
 		if !ok || req.Candidate == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "peer ou candidate ausente"})
+			// Candidato chegou antes do peer — ignora sem erro fatal.
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 			return
 		}
 		if err := mgr.AddICECandidate(*req.Candidate); err != nil {

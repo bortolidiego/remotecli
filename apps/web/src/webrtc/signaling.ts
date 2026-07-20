@@ -145,10 +145,19 @@ export class SignalingClient {
 
     const offer = await this.pc.createOffer()
     await this.pc.setLocalDescription(offer)
+    // Aguarda ICE gathering para embutir candidatos no SDP (LAN Mac↔iPhone).
+    await waitIceGatheringComplete(this.pc)
+    const completeOffer = this.pc.localDescription
+    if (!completeOffer) {
+      throw new Error('SDP local vazio após ICE gather')
+    }
     // post() já prefixa /api
     const answer = await this.post<SDPMessage>('/webrtc/offer', {
-      sdp: offer,
+      sdp: completeOffer,
     })
+    if (!answer?.sdp) {
+      throw new Error('resposta WebRTC sem SDP')
+    }
     await this.pc.setRemoteDescription(answer.sdp)
     this.flushCandidates()
   }
@@ -243,8 +252,13 @@ export class SignalingClient {
     if (!this.pc) return
     const offer = await this.pc.createOffer({ iceRestart: true })
     await this.pc.setLocalDescription(offer)
-    const answer = await this.post<SDPMessage>('/webrtc/offer', { sdp: offer })
-    await this.pc.setRemoteDescription(answer.sdp)
+    await waitIceGatheringComplete(this.pc)
+    const complete = this.pc.localDescription
+    if (!complete) return
+    const answer = await this.post<SDPMessage>('/webrtc/offer', { sdp: complete })
+    if (answer?.sdp) {
+      await this.pc.setRemoteDescription(answer.sdp)
+    }
   }
 
   private scheduleReconnect() {
@@ -316,4 +330,22 @@ export class SignalingClient {
     }
     return res.json() as Promise<StatusMessage>
   }
+}
+
+function waitIceGatheringComplete(pc: RTCPeerConnection, timeoutMs = 4000): Promise<void> {
+  if (pc.iceGatheringState === 'complete') {
+    return Promise.resolve()
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      pc.removeEventListener('icegatheringstatechange', onChange)
+      window.clearTimeout(timer)
+      resolve()
+    }
+    const onChange = () => {
+      if (pc.iceGatheringState === 'complete') done()
+    }
+    const timer = window.setTimeout(done, timeoutMs)
+    pc.addEventListener('icegatheringstatechange', onChange)
+  })
 }

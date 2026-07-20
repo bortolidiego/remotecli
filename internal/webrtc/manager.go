@@ -251,16 +251,22 @@ func (pm *PeerManager) dispatch(msgType channel.MessageType, payload []byte) {
 	}
 }
 
-// CreateOffer inicia a negociação WebRTC.
+// CreateOffer inicia a negociação WebRTC e espera ICE gathering (SDP completo).
 func (pm *PeerManager) CreateOffer() (*webrtc.SessionDescription, error) {
 	offer, err := pm.pc.CreateOffer(nil)
 	if err != nil {
 		return nil, err
 	}
+	gatherComplete := webrtc.GatheringCompletePromise(pm.pc)
 	if err := pm.pc.SetLocalDescription(offer); err != nil {
 		return nil, err
 	}
-	return &offer, nil
+	<-gatherComplete
+	desc := pm.pc.LocalDescription()
+	if desc == nil {
+		return nil, errors.New("local description vazia após gather")
+	}
+	return desc, nil
 }
 
 // SetRemoteAnswer aplica a resposta remota.
@@ -268,7 +274,8 @@ func (pm *PeerManager) SetRemoteAnswer(answer webrtc.SessionDescription) error {
 	return pm.pc.SetRemoteDescription(answer)
 }
 
-// SetRemoteOffer aplica a oferta remota e gera answer.
+// SetRemoteOffer aplica a oferta remota e gera answer com ICE gather completo
+// (evita depender de trickle host→client, que ainda não existe).
 func (pm *PeerManager) SetRemoteOffer(offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	if err := pm.pc.SetRemoteDescription(offer); err != nil {
 		return nil, err
@@ -277,10 +284,16 @@ func (pm *PeerManager) SetRemoteOffer(offer webrtc.SessionDescription) (*webrtc.
 	if err != nil {
 		return nil, err
 	}
+	gatherComplete := webrtc.GatheringCompletePromise(pm.pc)
 	if err := pm.pc.SetLocalDescription(answer); err != nil {
 		return nil, err
 	}
-	return &answer, nil
+	<-gatherComplete
+	desc := pm.pc.LocalDescription()
+	if desc == nil {
+		return nil, errors.New("local description vazia após gather")
+	}
+	return desc, nil
 }
 
 // AddICECandidate adiciona candidato remoto.
