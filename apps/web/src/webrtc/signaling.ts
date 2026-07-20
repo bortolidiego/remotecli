@@ -145,7 +145,8 @@ export class SignalingClient {
 
     const offer = await this.pc.createOffer()
     await this.pc.setLocalDescription(offer)
-    const answer = await this.post<SDPMessage>('/api/webrtc/offer', {
+    // post() já prefixa /api
+    const answer = await this.post<SDPMessage>('/webrtc/offer', {
       sdp: offer,
     })
     await this.pc.setRemoteDescription(answer.sdp)
@@ -205,7 +206,7 @@ export class SignalingClient {
 
   private async sendICE(candidate: RTCIceCandidateInit) {
     try {
-      await this.post('/api/webrtc/ice', { candidate })
+      await this.post('/webrtc/ice', { candidate })
     } catch (err) {
       this.onError?.(err as Error)
     }
@@ -242,7 +243,7 @@ export class SignalingClient {
     if (!this.pc) return
     const offer = await this.pc.createOffer({ iceRestart: true })
     await this.pc.setLocalDescription(offer)
-    const answer = await this.post<SDPMessage>('/api/webrtc/offer', { sdp: offer })
+    const answer = await this.post<SDPMessage>('/webrtc/offer', { sdp: offer })
     await this.pc.setRemoteDescription(answer.sdp)
   }
 
