@@ -139,7 +139,7 @@ func New(cfg Config) (*Agent, error) {
 	mux.HandleFunc("/api/devices", a.requireAuth(a.handleDevices))
 	mux.HandleFunc("/api/sessions", a.requireAuth(a.handleSessions))
 	a.registerCodexRoutes(mux)
-	mux.HandleFunc("/api/lease/release", a.requireAuth(a.handleLeaseRelease))
+	mux.HandleFunc("/api/lease/release", a.handleLeaseRelease) // sem requireAuth: release é idempotente
 	mux.HandleFunc("/api/revoke", a.handleRevoke)
 	mux.HandleFunc("/api/read", a.requireLease(a.handleRead))
 	mux.Handle("/", web.Handler())
