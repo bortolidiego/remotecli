@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -91,6 +92,34 @@ func NewRegistry(identity *crypto.IdentityPair, store keychain.Store, sessionID,
 func (r *Registry) HostName() string { return r.hostName }
 
 func (r *Registry) BasePath() string { return r.basePath }
+
+// LANEndpoint transforma "host:port" em URL acessível na LAN.
+func LANEndpoint(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		port = "24109"
+	}
+	ip := localIP()
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s:%s", ip, port)
+}
+
+func localIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				return ipNet.IP.String()
+			}
+		}
+	}
+	return ""
+}
 
 func (r *Registry) SetSessionMetadata(meta contracts.SessionMetadata) {
 	r.mu.Lock()

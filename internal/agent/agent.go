@@ -27,7 +27,7 @@ import (
 	"github.com/bortolidiego/relay/shared/contracts"
 )
 
-const defaultAddr = "127.0.0.1:24109"
+const defaultAddr = "0.0.0.0:24109"
 
 // Agent é o servidor local Relay.
 type Agent struct {
@@ -78,7 +78,7 @@ func New(cfg Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	registry, err := pairing.NewRegistry(identity, s, cfg.SessionID, cfg.HostName, "http://"+cfg.Addr, cfg.BasePath)
+	registry, err := pairing.NewRegistry(identity, s, cfg.SessionID, cfg.HostName, pairing.LANEndpoint(cfg.Addr), cfg.BasePath)
 	if err != nil {
 		return nil, err
 	}

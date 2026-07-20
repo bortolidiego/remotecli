@@ -42,9 +42,21 @@ export default function App() {
   const [target, setTarget] = useState<'window' | 'display'>('display')
   const [fullScreen, setFullScreen] = useState(false)
   const [promptText, setPromptText] = useState('')
+  const [scannedOffer, setScannedOffer] = useState('')
   const videoRef = useRef<HTMLVideoElement>(null)
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(() => pairState && ({ deviceId: pairState.deviceId, leaseToken: pairState.leaseToken }), [pairState])
+
+  // Carrega oferta via ?offer= na URL (QR code). URLSearchParams já decodifica uma vez.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const offerParam = params.get('offer')
+    if (offerParam && !pairState) {
+      setOffer(offerParam)
+      setScannedOffer(offerParam)
+      setMessage('Oferta detectada no QR. Confirme o pareamento abaixo.')
+    }
+  }, [pairState])
 
   // Polling leve de aprovações e eventos Codex.
   useEffect(() => {
@@ -291,7 +303,7 @@ export default function App() {
         </header>
         <section className="panel">
           <h2>Emparelhar este dispositivo</h2>
-          <p className="muted">Cole o envelope assinado gerado pelo CLI. Antes do pareamento, nenhuma sessão, cwd, device ou metadado é consultado.</p>
+          <p className="muted">Cole o envelope assinado gerado pelo CLI ou escaneie o QR do Mac. Antes do pareamento, nenhuma sessão, cwd, device ou metadado é consultado.</p>
           <label>
             Nome do dispositivo
             <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
@@ -300,7 +312,9 @@ export default function App() {
             Envelope ou payload QR
             <textarea value={offer} onChange={(event) => setOffer(event.target.value)} rows={8} />
           </label>
-          <button onClick={submitPair} disabled={!offer.trim() || !deviceName.trim()}>Parear com WebCrypto</button>
+          <button onClick={submitPair} disabled={!offer.trim() || !deviceName.trim()}>
+            {scannedOffer ? 'Parear via QR' : 'Parear com WebCrypto'}
+          </button>
           {message && <p className="notice">{message}</p>}
         </section>
       </Shell>

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,7 +42,7 @@ type CLI struct {
 
 // SharedFlags usadas por comandos que precisam do agente.
 type SharedFlags struct {
-	Addr       string `env:"RELAY_ADDR" default:"127.0.0.1:24109" help:"Endereço do agente Relay."`
+	Addr       string `env:"RELAY_ADDR" default:"127.0.0.1:24109" help:"Endereço do agente Relay para clientes (fallback para 127.0.0.1 se bind for 0.0.0.0)."`
 	SessionID  string `env:"RELAY_SESSION_ID" help:"ID da sessão Relay."`
 	LocalToken string `env:"RELAY_LOCAL_TOKEN" help:"Override explícito do token local; uso normal recupera do Keychain."`
 }
@@ -99,7 +100,7 @@ func runServe(sessionID, hostName, basePath, windowID string, frontmost bool, pi
 		}
 	}
 	cfg := agent.Config{
-		Addr:      "127.0.0.1:24109",
+		Addr:      defaultAgentAddr(),
 		SessionID: sessionID,
 		HostName:  name,
 		BasePath:  base,
@@ -156,12 +157,13 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	}
 	s.SessionID = resolveSessionID(s.SessionID)
 	fmt.Printf("Sessão: %s\n", s.SessionID)
+	clientAddr := clientAddr(s.Addr)
 	if s.NoStart {
-		if !agentHealthy(s.Addr) {
+		if !agentHealthy(clientAddr) {
 			return fmt.Errorf("agente não está no ar; rode sem --no-start ou inicie com 'relay serve %s'", s.SessionID)
 		}
 	} else {
-		startedAgent, err := ensureAgentRunning(selfExe, s.SessionID, s.Addr, defaultAgentStartTimeout)
+		startedAgent, err := ensureAgentRunning(selfExe, s.SessionID, clientAddr, defaultAgentStartTimeout)
 		if err != nil {
 			return err
 		}
@@ -177,7 +179,7 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	}
 
 	if !s.NoTunnel {
-		if err := requestTunnelStart(s.Addr, token); err != nil {
+		if err := requestTunnelStart(clientAddr, token); err != nil {
 			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
 				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado. Instale com 'brew install cloudflared' para acesso remoto.\n")
 			} else if errors.Is(err, tunnel.ErrTokenMissing) {
@@ -194,10 +196,10 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := postAgent(s.Addr, "/api/metadata", metaBody, token); err != nil {
+	if _, err := postAgent(clientAddr, "/api/metadata", metaBody, token); err != nil {
 		return err
 	}
-	body, err := postAgent(s.Addr, "/api/offer", nil, token)
+	body, err := postAgent(clientAddr, "/api/offer", nil, token)
 	if err != nil {
 		return err
 	}
@@ -205,20 +207,23 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if err := json.Unmarshal(body, &env); err != nil {
 		return err
 	}
-	if _, err := pairing.VerifySignedOffer(env, time.Now()); err != nil {
+	offer, err := pairing.VerifySignedOffer(env, time.Now())
+	if err != nil {
 		return err
 	}
 	qrPath := s.QROut
 	if qrPath == "" {
 		qrPath = defaultQRPath(s.SessionID)
 	}
-	if err := writeQRCode(qrPath, string(body)); err != nil {
+	qrURL := buildOfferURL(offer.Endpoint, body)
+	if err := writeQRCode(qrPath, qrURL); err != nil {
 		return err
 	}
+	fmt.Println(qrURL)
 	fmt.Println(string(body))
 	fmt.Println(string(env.Payload))
 	fmt.Printf("QR local one-time: %s\n", qrPath)
-	fmt.Printf("Payload local one-time gerado para %s. Expira em 2 minutos.\n", s.SessionID)
+	fmt.Printf("URL do QR expira em 2 minutos. Endpoint: %s\n", offer.Endpoint)
 	if ip := localIP(); ip != "" {
 		fmt.Printf("Abra no celular (mesma rede): http://%s:24109\n", ip)
 	} else {
@@ -363,6 +368,28 @@ func postAgent(addr, path string, data []byte, localToken string) ([]byte, error
 }
 
 const defaultAgentStartTimeout = 10 * time.Second
+
+func defaultAgentAddr() string {
+	if v := os.Getenv("RELAY_BIND_ADDR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("RELAY_ADDR"); v != "" {
+		return v
+	}
+	return "0.0.0.0:24109"
+}
+
+// clientAddr converte endereço de bind em endereço para clientes locais.
+func clientAddr(bind string) string {
+	host, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		return "127.0.0.1:24109"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return "127.0.0.1:" + port
+	}
+	return bind
+}
 
 func resolveSessionID(id string) string {
 	if id != "" {
@@ -553,6 +580,14 @@ func writeQRCode(path, payload string) error {
 		return fmt.Errorf("payload QR vazio")
 	}
 	return qrcode.WriteFile(payload, qrcode.Medium, 320, path)
+}
+
+func buildOfferURL(endpoint string, envelope []byte) string {
+	u := endpoint
+	if u == "" {
+		u = "http://127.0.0.1:24109"
+	}
+	return u + "/?offer=" + url.QueryEscape(string(envelope))
 }
 
 func buildSessionMetadata(sessionID, windowID string, frontmost bool, targetPID int) contracts.SessionMetadata {
