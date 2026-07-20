@@ -154,12 +154,24 @@ type PairResponse struct {
 	LeaseExpiry time.Time `json:"lease_expiry"`
 }
 
+// TunnelStatus descreve o estado do Cloudflare Tunnel.
+type TunnelStatus struct {
+	Enabled   bool      `json:"enabled"`
+	Running   bool      `json:"running"`
+	Name      string    `json:"name,omitempty"`
+	Hostname  string    `json:"hostname,omitempty"`
+	URL       string    `json:"url,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	Error     string    `json:"error,omitempty"`
+}
+
 // AgentStatus resumo de runtime — mínimo para visitantes.
 type AgentStatus struct {
-	Listening bool   `json:"listening"`
-	Address   string `json:"address"`
-	Version   string `json:"version"`
-	Paired    bool   `json:"paired,omitempty"`
+	Listening bool         `json:"listening"`
+	Address   string       `json:"address"`
+	Version   string       `json:"version"`
+	Paired    bool         `json:"paired,omitempty"`
+	Tunnel    TunnelStatus `json:"tunnel,omitempty"`
 }
 
 // AuthenticatedStatus resumo completo, apenas para dispositivos autenticados.

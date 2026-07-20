@@ -1,6 +1,6 @@
-# Relay - Marco 3
+# Relay - Marco 4.1
 
-MVP pessoal para macOS arm64 com agente Go local, PWA embarcada/offline, CLI e helper Swift de menu bar. **Marco 3** adiciona transporte visual/controle local via WebRTC, IPC com helper Swift e segurança de DataChannel.
+MVP pessoal para macOS arm64 com agente Go local, PWA embarcada/offline, CLI e helper Swift de menu bar. **Marco 4.1** adiciona scaffold do Cloudflare Tunnel (`internal/tunnel`) com manager real/fake, preferências salvas no Keychain e integração CLI.
 
 ## Estrutura
 
@@ -15,6 +15,7 @@ internal/ipc          Unix domain socket Go↔helper com framing binário
 internal/keychain     Store interface: macOS security CLI / fake para testes
 internal/pairing      Registry, QR one-time, nonce replay guard, lease
 internal/sandbox      Path canonico + bloqueios + limite 25MB
+internal/tunnel       Cloudflare Tunnel: Start/Stop/Status, runner real/fake
 internal/web          go:embed de apps/web/dist com fallback SPA/PWA
 internal/webrtc       PeerConnection Pion por lease, DataChannels, ICE
 shared/contracts      SessionDescriptor e payloads compartilhados
@@ -58,6 +59,20 @@ export RELAY_SESSION_ID=minha-sessao
 ./relay devices
 ./relay stop
 ```
+
+### Cloudflare Tunnel (Marco 4.1)
+
+Habilite no setup (o token pode vir de `RELAY_TUNNEL_TOKEN`):
+
+```bash
+export RELAY_TUNNEL_TOKEN="<seu-token-do-cloudflare-tunnel>"
+./relay setup minha-sessao "Meu Mac" "$PWD" --tunnel-enabled --tunnel-name relay-diego --tunnel-hostname relay.kbtech.com.br
+./relay share   # inicia o tunnel automaticamente se configurado
+./relay status  # mostra estado do tunnel em tunnel.*
+./relay stop    # encerra agente + tunnel
+```
+
+Sem `cloudflared` instalado, `share` imprime um aviso claro em vez de falhar.
 
 `RELAY_LOCAL_TOKEN` ainda existe como override explícito para testes. O uso normal não precisa dele.
 
@@ -103,9 +118,17 @@ Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, de
 
 Transporte visual/controle local completo: WebRTC + DataChannels cifrados + IPC Go↔helper + STUN default. Pronto para uso local entre Mac e celular na mesma LAN.
 
+## Marco 4.1 — Cloudflare Tunnel (scaffold)
+
+- `internal/tunnel` com `Manager` real/fake (`Start`, `Stop`, `Status`).
+- Default: nome `relay-diego`, hostname `relay.kbtech.com.br`, URL `http://127.0.0.1:24109`.
+- Token via `RELAY_TUNNEL_TOKEN`, env ou preferência salva no Keychain.
+- Erros claros quando `cloudflared` ou token estão ausentes.
+- CLI `setup` grava preferências; `share` inicia tunnel se configurado; `status` expõe estado; `stop` encerra agente + tunnel.
+- Testes unitários com runner fake; `go test ./...` e `-race` passam.
+
 ## Marco 4 — Próximos passos
 
-- Cloudflare Tunnel para acesso remoto.
 - TURN real (`ShortLivedTURNProvider` já é stub).
 - Adapter Codex.
 - Transferência de arquivos e aceite real no iPhone.

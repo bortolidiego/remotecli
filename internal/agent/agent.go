@@ -21,6 +21,7 @@ import (
 	"github.com/bortolidiego/relay/internal/keychain"
 	"github.com/bortolidiego/relay/internal/pairing"
 	"github.com/bortolidiego/relay/internal/sandbox"
+	"github.com/bortolidiego/relay/internal/tunnel"
 	"github.com/bortolidiego/relay/internal/web"
 	"github.com/bortolidiego/relay/shared/contracts"
 )
@@ -45,6 +46,9 @@ type Agent struct {
 	pwaHandler  http.Handler
 	localToken  string // token que permite acesso a endpoints administrativos vindos do CLI local
 	peerManager *PeerManager
+	tunnel         *tunnel.Manager
+	tunnelConfig   tunnel.Config
+	tunnelRunner_  tunnel.ProcessRunner
 }
 
 // New cria o agente, carregando ou criando identidade no Keychain.
@@ -82,14 +86,18 @@ func New(cfg Config) (*Agent, error) {
 		return nil, err
 	}
 
+	tun := tunnel.NewManager(cfg.Tunnel, cfg.TunnelRunner)
 	a := &Agent{
-		addr:       cfg.Addr,
-		store:      s,
-		registry:   registry,
-		sessionID:  cfg.SessionID,
-		basePath:   cfg.BasePath,
-		localToken: localToken,
-		stopped:    make(chan struct{}),
+		addr:         cfg.Addr,
+		store:        s,
+		registry:     registry,
+		sessionID:    cfg.SessionID,
+		basePath:     cfg.BasePath,
+		localToken:   localToken,
+		stopped:      make(chan struct{}),
+		tunnel:        tun,
+		tunnelConfig:  cfg.Tunnel,
+		tunnelRunner_: cfg.TunnelRunner,
 	}
 	peerMgr, err := NewPeerManager(a)
 	if err != nil {
@@ -101,6 +109,8 @@ func New(cfg Config) (*Agent, error) {
 	mux.HandleFunc("/api/offer", a.requireLocal(a.handleOffer))
 	mux.HandleFunc("/api/metadata", a.requireLocal(a.handleMetadata))
 	mux.HandleFunc("/api/stop", a.requireLocal(a.handleStop))
+	mux.HandleFunc("/api/tunnel/start", a.requireLocal(a.handleTunnelStart))
+	mux.HandleFunc("/api/tunnel/stop", a.requireLocal(a.handleTunnelStop))
 	mux.HandleFunc("/api/pair", a.handlePair)
 	mux.HandleFunc("/api/status", a.requireAuth(a.handleStatus))
 	mux.HandleFunc("/api/devices", a.requireAuth(a.handleDevices))
@@ -213,12 +223,14 @@ func generateLocalToken() (string, error) {
 
 // Config para inicialização do agente.
 type Config struct {
-	Addr      string
-	SessionID string
-	HostName  string
-	BasePath  string
-	Store     keychain.Store
-	Metadata  contracts.SessionMetadata
+	Addr          string
+	SessionID     string
+	HostName      string
+	BasePath      string
+	Store         keychain.Store
+	Metadata      contracts.SessionMetadata
+	Tunnel        tunnel.Config
+	TunnelRunner  tunnel.ProcessRunner
 }
 
 func (a *Agent) ListenAddr() string {
@@ -240,7 +252,31 @@ func (a *Agent) LocalToken() string { return a.localToken }
 
 func (a *Agent) Done() <-chan struct{} { return a.stopped }
 
-// Start inicia o agente em background.
+func (a *Agent) TunnelManager() *tunnel.Manager { return a.tunnel }
+
+func (a *Agent) tunnelRunner() tunnel.ProcessRunner {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.tunnelRunner_
+}
+
+// SetTunnelConfig atualiza preferências do tunnel; não reinicia um tunnel em execução.
+func (a *Agent) SetTunnelConfig(cfg tunnel.Config) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.tunnelConfig = cfg
+	if a.tunnel != nil {
+		a.tunnel.SetConfig(cfg)
+	}
+}
+
+func (a *Agent) TunnelConfig() tunnel.Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.tunnelConfig
+}
+
+// Start inicia o agente em background. Se o tunnel estiver habilitado e tiver token, inicia-o também.
 func (a *Agent) Start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -261,10 +297,23 @@ func (a *Agent) Start() error {
 	if _, err := a.peerManager.StartIPC(""); err != nil {
 		log.Printf("ipc start warning: %v", err)
 	}
+	if a.tunnel != nil && a.tunnelConfig.Enabled {
+		if _, err := tunnel.ResolveToken(a.tunnelConfig); err == nil {
+			if err := a.tunnel.Start(context.Background()); err != nil && !errors.Is(err, tunnel.ErrAlreadyRunning) {
+				if errors.Is(err, tunnel.ErrCloudflaredMissing) {
+					log.Printf("tunnel start warning: cloudflared não encontrado no PATH")
+				} else if errors.Is(err, tunnel.ErrTokenMissing) {
+					log.Printf("tunnel start warning: token do tunnel não configurado")
+				} else {
+					log.Printf("tunnel start warning: %v", err)
+				}
+			}
+		}
+	}
 	return nil
 }
 
-// Stop finaliza o agente.
+// Stop finaliza o agente e o tunnel.
 func (a *Agent) Stop(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -272,6 +321,9 @@ func (a *Agent) Stop(ctx context.Context) error {
 		return nil
 	}
 	a.running = false
+	if a.tunnel != nil {
+		_ = a.tunnel.Stop(ctx)
+	}
 	if a.peerManager != nil {
 		_ = a.peerManager.Stop()
 	}
@@ -424,6 +476,54 @@ func (a *Agent) handleStop(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+func (a *Agent) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.tunnel == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tunnel manager indisponível"})
+		return
+	}
+	if _, err := tunnel.ResolveToken(a.tunnel.Config()); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	err := a.tunnel.Start(context.Background())
+	if err != nil {
+		if errors.Is(err, tunnel.ErrAlreadyRunning) {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "already running"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+func (a *Agent) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.tunnel == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tunnel manager indisponível"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := a.tunnel.Stop(ctx)
+	if err != nil {
+		if errors.Is(err, tunnel.ErrNotRunning) {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "not running"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
 func (a *Agent) handlePair(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
@@ -474,11 +574,23 @@ func (a *Agent) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) currentAgentStatus() contracts.AgentStatus {
+	ts := contracts.TunnelStatus{Enabled: a.tunnelConfig.Enabled}
+	if a.tunnel != nil {
+		st := a.tunnel.Status()
+		ts.Enabled = a.tunnelConfig.Enabled
+		ts.Running = st.Running
+		ts.Name = st.Name
+		ts.Hostname = st.Hostname
+		ts.URL = st.URL
+		ts.StartedAt = st.StartedAt
+		ts.Error = st.Error
+	}
 	return contracts.AgentStatus{
 		Listening: a.Running(),
 		Address:   a.ListenAddr(),
 		Version:   "relay-m2",
 		Paired:    a.registry.HasDevices(),
+		Tunnel:    ts,
 	}
 }
 

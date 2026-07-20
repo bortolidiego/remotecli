@@ -12,17 +12,25 @@ import (
 
 	"github.com/bortolidiego/relay/internal/crypto"
 	"github.com/bortolidiego/relay/internal/keychain"
+	"github.com/bortolidiego/relay/internal/tunnel"
 	"github.com/bortolidiego/relay/shared/contracts"
 	"github.com/stretchr/testify/require"
 )
 
 func startTestAgent(t *testing.T) *Agent {
+	return startTestAgentWithTunnel(t, tunnel.Config{})
+}
+
+func startTestAgentWithTunnel(t *testing.T, tunCfg tunnel.Config) *Agent {
+	runner := &fakeTunnelRunner{}
 	ag, err := New(Config{
-		Addr:      "127.0.0.1:0",
-		SessionID: "test-sess-" + t.Name(),
-		HostName:  "test-host",
-		BasePath:  t.TempDir(),
-		Store:     keychain.NewFakeStore(),
+		Addr:         "127.0.0.1:0",
+		SessionID:    "test-sess-" + t.Name(),
+		HostName:     "test-host",
+		BasePath:     t.TempDir(),
+		Store:        keychain.NewFakeStore(),
+		Tunnel:       tunCfg,
+		TunnelRunner: runner,
 	})
 	require.NoError(t, err)
 	require.NoError(t, ag.Start())

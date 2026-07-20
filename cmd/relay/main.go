@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/bortolidiego/relay/internal/agent"
 	"github.com/bortolidiego/relay/internal/keychain"
 	"github.com/bortolidiego/relay/internal/pairing"
+	"github.com/bortolidiego/relay/internal/tunnel"
 	"github.com/bortolidiego/relay/shared/contracts"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -48,6 +50,12 @@ type SetupCmd struct {
 	Frontmost bool   `help:"Marca a sessão como janela frontmost detectada pelo usuário."`
 	WindowID  string `help:"Identificador da janela nativa, quando conhecido."`
 	PID       int    `env:"RELAY_TARGET_PID" help:"PID alvo da sessão; default seguro é o processo pai."`
+
+	TunnelEnabled   bool   `help:"Habilita Cloudflare Tunnel no share."`
+	TunnelName      string `env:"RELAY_TUNNEL_NAME" default:"relay-diego" help:"Nome do tunnel."`
+	TunnelHostname  string `env:"RELAY_TUNNEL_HOSTNAME" default:"relay.kbtech.com.br" help:"Hostname público do tunnel."`
+	TunnelToken     string `env:"RELAY_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel (preferir env)."`
+	TunnelURL       string `env:"RELAY_TUNNEL_URL" default:"http://127.0.0.1:24109" help:"URL local para o qual o tunnel aponta."`
 }
 
 func (s *SetupCmd) Run(ctx *kong.Context) error {
@@ -60,13 +68,28 @@ func (s *SetupCmd) Run(ctx *kong.Context) error {
 	if base == "" {
 		base, _ = os.Getwd()
 	}
+	tunCfg := tunnel.Config{
+		Enabled:  s.TunnelEnabled,
+		Name:     s.TunnelName,
+		Hostname: s.TunnelHostname,
+		URL:      s.TunnelURL,
+		Token:    s.TunnelToken,
+	}
+	tunCfg.Normalize()
+	store := keychain.DefaultStore()
+	if tunCfg.Enabled {
+		if err := saveTunnelConfig(store, s.SessionID, tunCfg); err != nil {
+			return err
+		}
+	}
 	cfg := agent.Config{
 		Addr:      "127.0.0.1:24109",
 		SessionID: s.SessionID,
 		HostName:  name,
 		BasePath:  base,
-		Store:     keychain.DefaultStore(),
+		Store:     store,
 		Metadata:  buildSessionMetadata(s.SessionID, s.WindowID, s.Frontmost, s.PID),
+		Tunnel:    tunCfg,
 	}
 	ag, err := agent.New(cfg)
 	if err != nil {
@@ -80,6 +103,9 @@ func (s *SetupCmd) Run(ctx *kong.Context) error {
 	fmt.Printf("Host: %s (%s)\n", name, ag.Registry().HostID())
 	fmt.Printf("Agente: http://%s\n", ag.ListenAddr())
 	fmt.Printf("Sandbox: %s\n", base)
+	if tunCfg.Enabled {
+		fmt.Printf("Tunnel: habilitado (%s -> %s)\n", tunCfg.Hostname, tunCfg.URL)
+	}
 	fmt.Println("Identidade e token local salvos no Keychain. O agente continua rodando.")
 	<-ag.Done()
 	return nil
@@ -91,6 +117,7 @@ type ShareCmd struct {
 	WindowID  string `help:"Identificador da janela nativa, quando conhecido."`
 	PID       int    `env:"RELAY_TARGET_PID" help:"PID alvo da sessão; default seguro é o processo pai."`
 	QROut     string `help:"Caminho do PNG QR. Default: relay-pair-<sessao>.png no cwd."`
+	NoTunnel  bool   `help:"Não inicia o tunnel mesmo que configurado."`
 }
 
 func (s *ShareCmd) Run(ctx *kong.Context) error {
@@ -100,9 +127,23 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if s.SessionID == "" {
 		return fmt.Errorf("RELAY_SESSION_ID necessário quando CODEX_THREAD_ID/MAESTRI_TERMINAL_ID não existem")
 	}
-	token, err := resolveLocalToken(s.LocalToken, s.SessionID, keychain.DefaultStore())
+	store := keychain.DefaultStore()
+	token, err := resolveLocalToken(s.LocalToken, s.SessionID, store)
 	if err != nil {
 		return err
+	}
+	if !s.NoTunnel {
+		if err := requestTunnelStart(s.Addr, token); err != nil {
+			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
+				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado. Instale com 'brew install cloudflared' para acesso remoto.\n")
+			} else if errors.Is(err, tunnel.ErrTokenMissing) {
+				fmt.Fprintf(os.Stderr, "Aviso: token do tunnel não configurado. Tunnel não iniciado. Use setup --tunnel-enabled --tunnel-token=... ou RELAY_TUNNEL_TOKEN.\n")
+			} else if errors.Is(err, tunnel.ErrTunnelDisabled) || isAgentTunnelDisabled(err) {
+				// silencioso quando desabilitado
+			} else {
+				return err
+			}
+		}
 	}
 	meta := buildSessionMetadata(s.SessionID, s.WindowID, s.Frontmost, s.PID)
 	metaBody, err := json.Marshal(meta)
@@ -177,7 +218,8 @@ type StopCmd struct {
 }
 
 func (s *StopCmd) Run(ctx *kong.Context) error {
-	token, err := resolveLocalToken(s.LocalToken, s.SessionID, keychain.DefaultStore())
+	store := keychain.DefaultStore()
+	token, err := resolveLocalToken(s.LocalToken, s.SessionID, store)
 	if err != nil {
 		return err
 	}
@@ -293,6 +335,64 @@ func resolveLocalToken(override, sessionID string, store keychain.Store) (string
 		return "", fmt.Errorf("token local não encontrado no Keychain para %s: %w", sessionID, err)
 	}
 	return token, nil
+}
+
+const tunnelKey = "relay-tunnel-config"
+
+var errTunnelConfigMissing = errors.New("configuração de tunnel não encontrada")
+
+func tunnelAccount(sessionID string) string { return "host-" + sessionID }
+
+func saveTunnelConfig(store keychain.Store, sessionID string, cfg tunnel.Config) error {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return store.SaveSecret(tunnelKey, tunnelAccount(sessionID), b)
+}
+
+func loadTunnelConfig(store keychain.Store, sessionID string) (tunnel.Config, error) {
+	b, err := store.LoadSecret(tunnelKey, tunnelAccount(sessionID))
+	if err != nil {
+		return tunnel.Config{}, errTunnelConfigMissing
+	}
+	var cfg tunnel.Config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return tunnel.Config{}, err
+	}
+	cfg.Normalize()
+	return cfg, nil
+}
+
+func requestTunnelStart(addr, token string) error {
+	body, err := postAgent(addr, "/api/tunnel/start", nil, token)
+	if err != nil {
+		return fmt.Errorf("falha ao solicitar início do tunnel: %w", err)
+	}
+	var resp struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		if strings.Contains(resp.Error, "token do Cloudflare Tunnel") {
+			return tunnel.ErrTokenMissing
+		}
+		if strings.Contains(resp.Error, "cloudflared não encontrado") {
+			return tunnel.ErrCloudflaredMissing
+		}
+		return errors.New(resp.Error)
+	}
+	if resp.Status == "started" || resp.Status == "already running" {
+		return nil
+	}
+	return fmt.Errorf("tunnel status inesperado: %s", resp.Status)
+}
+
+func isAgentTunnelDisabled(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "tunnel desabilitado")
 }
 
 func defaultQRPath(sessionID string) string {
