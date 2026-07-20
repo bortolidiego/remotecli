@@ -35,6 +35,8 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
   - transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`)
   - endpoints de lease no agente: `/api/sessions/{id}/turn`, `/interrupt`, `/events`, `/approvals`, `/approvals/{id}`
   - PWA: envio/interrupção real, modal de aprovação com Permitir/Negar e polling de aprovações/eventos
+  - CLI `relay share` auto-inicia agente em background e gera QR sem precisar `setup` primeiro
+  - comando `relay serve` sobe agente em foreground; `make install` copia binário para `~/.local/bin`
   - `go test ./...`, `go test -race ./...` e `npm test -- --run` passam
 
 ## O que fica pro Marco 4

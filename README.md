@@ -46,12 +46,23 @@ cd helper/RelayHelper && swift build && swift test
 
 ## Uso Local
 
+### Fluxo feliz (um comando)
+
 ```bash
-go build ./cmd/relay
-./relay setup minha-sessao "Meu Mac" "$PWD" --frontmost
+make install
+relay share
 ```
 
-O `setup` cria identidade, ECDH e token local no Keychain. O token não é impresso. Em outro terminal, informe só a sessão; o CLI recupera o token automaticamente do Keychain:
+`relay share` sobe o agente em background se necessário, cria identidade/token no Keychain se for a primeira vez, atualiza metadata da sessão e gera QR PNG no diretório atual. Funciona em qualquer terminal (Codex, Maestri, shell).
+
+### Comando explícito (foreground)
+
+```bash
+go build ./cmd/relay
+./relay serve minha-sessao "Meu Mac" "$PWD" --frontmost
+```
+
+O `serve` cria identidade, ECDH e token local no Keychain e fica em foreground. O token não é impresso. Em outro terminal, informe só a sessão; o CLI recupera o token automaticamente do Keychain:
 
 ```bash
 export RELAY_SESSION_ID=minha-sessao
@@ -98,6 +109,7 @@ Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, de
 - Local admin: `POST /api/offer`, `POST /api/metadata`, `POST /api/revoke`, `POST /api/stop`.
 - Autenticados por local token ou lease: `GET /api/status`, `GET /api/devices`, `GET /api/sessions`, `GET /api/sessions/{id}`.
 - Lease: `POST /api/lease/release`, `GET /api/read?path=...`.
+- Comandos CLI: `relay serve` (daemon foreground), `relay share` (auto-start + QR), `relay setup` (configuração inicial).
 - Codex (lease, requer sessão com `codexThreadId`): `POST /api/sessions/{id}/turn`, `POST /api/sessions/{id}/interrupt`, `GET /api/sessions/{id}/events`, `GET /api/sessions/{id}/approvals`, `POST /api/sessions/{id}/approvals/{approvalId}`.
 - WebRTC signaling (lease): `POST /api/webrtc/offer`, `POST /api/webrtc/answer`, `POST /api/webrtc/ice`, `GET /api/webrtc/status`.
 
@@ -133,10 +145,12 @@ Transporte visual/controle local completo: WebRTC + DataChannels cifrados + IPC 
 
 - `internal/codex`: JSON-RPC 2.0 client com transporte injetável (`stdio`, Unix socket) e `FakeTransport` para testes.
 - Métodos implementados: `initialize`, `thread/resume`, `turn/start`, `turn/interrupt`.
-- Aprovações: `item/commandExecution/requestApproval` → decisões `accept` ou `decline` (MVP, sem `acceptForSession`).
+- Aprovações: `item/commandExecution/requestApproval` → `accept`/`decline` (MVP, sem `acceptForSession`).
 - Eventos normalizados em `status`, `timeline`, `error`, `approval`; resume busy vira `waiting_local`.
 - Transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`).
 - Endpoints de lease no agente Codex e PWA com envio/interrupção real e aprovações via polling.
+- CLI `relay share` auto-inicia agente em background e gera QR sem precisar `setup` primeiro.
+- Comando `relay serve` sobe agente em foreground; `make install` copia binário para `~/.local/bin`.
 
 ## Marco 4 — Próximos passos
 

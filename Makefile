@@ -1,4 +1,4 @@
-.PHONY: all web-build go-build test go-test race web-test swift-build swift-test fmt clean
+.PHONY: all web-build go-build install test go-test race web-test swift-build swift-test fmt clean
 
 all: web-build go-build
 
@@ -7,6 +7,10 @@ web-build:
 
 go-build:
 	go build ./cmd/relay
+
+install: go-build
+	mkdir -p $(HOME)/.local/bin
+	cp relay $(HOME)/.local/bin/relay
 
 test: go-test web-test swift-test
 

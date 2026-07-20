@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -25,14 +27,15 @@ import (
 
 var version = "relay-m2"
 
-// CLI expõe os comandos do Marco 2.
+// CLI expõe os comandos do Relay.
 type CLI struct {
+	Serve   ServeCmd   `cmd:"" help:"Sobe o agente em foreground (daemon)."`
 	Setup   SetupCmd   `cmd:"" help:"Inicializa sessão e identidade no Keychain."`
-	Share   ShareCmd   `cmd:"" help:"Gera oferta QR one-time para emparelhamento."`
+	Share   ShareCmd   `cmd:"" help:"Gera oferta QR one-time; sobe o agente se necessário."`
 	Pair    PairCmd    `cmd:"" help:"Valida uma oferta lida do QR; o pareamento real é feito pela PWA."`
-	Status  StatusCmd  `cmd:"" help:"Consulta status do agente local."`
+	Status  StatusCmd   `cmd:"" help:"Consulta status do agente local."`
 	Stop    StopCmd    `cmd:"" help:"Para o agente local."`
-	Devices DevicesCmd `cmd:"" help:"Lista dispositivos emparelhados."`
+	Devices DevicesCmd  `cmd:"" help:"Lista dispositivos emparelhados."`
 	Revoke  RevokeCmd  `cmd:"" help:"Revoga um dispositivo."`
 }
 
@@ -43,52 +46,65 @@ type SharedFlags struct {
 	LocalToken string `env:"RELAY_LOCAL_TOKEN" help:"Override explícito do token local; uso normal recupera do Keychain."`
 }
 
-type SetupCmd struct {
-	SessionID string `arg:"" required:"" help:"ID da sessão."`
+// ServeFlags comuns entre serve e setup.
+type ServeFlags struct {
+	SessionID string `arg:"" optional:"" env:"RELAY_SESSION_ID" help:"ID da sessão. Resolve de env se omitido."`
 	HostName  string `arg:"" optional:"" help:"Nome amigável do host."`
 	BasePath  string `arg:"" optional:"" help:"Caminho base do sandbox."`
 	Frontmost bool   `help:"Marca a sessão como janela frontmost detectada pelo usuário."`
 	WindowID  string `help:"Identificador da janela nativa, quando conhecido."`
 	PID       int    `env:"RELAY_TARGET_PID" help:"PID alvo da sessão; default seguro é o processo pai."`
 
-	TunnelEnabled   bool   `help:"Habilita Cloudflare Tunnel no share."`
-	TunnelName      string `env:"RELAY_TUNNEL_NAME" default:"relay-diego" help:"Nome do tunnel."`
-	TunnelHostname  string `env:"RELAY_TUNNEL_HOSTNAME" default:"relay.kbtech.com.br" help:"Hostname público do tunnel."`
-	TunnelToken     string `env:"RELAY_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel (preferir env)."`
-	TunnelURL       string `env:"RELAY_TUNNEL_URL" default:"http://127.0.0.1:24109" help:"URL local para o qual o tunnel aponta."`
+	TunnelEnabled  bool   `help:"Habilita Cloudflare Tunnel no share."`
+	TunnelName     string `env:"RELAY_TUNNEL_NAME" default:"relay-diego" help:"Nome do tunnel."`
+	TunnelHostname string `env:"RELAY_TUNNEL_HOSTNAME" default:"relay.kbtech.com.br" help:"Hostname público do tunnel."`
+	TunnelToken    string `env:"RELAY_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel (preferir env)."`
+	TunnelURL      string `env:"RELAY_TUNNEL_URL" default:"http://127.0.0.1:24109" help:"URL local para o qual o tunnel aponta."`
 }
 
-func (s *SetupCmd) Run(ctx *kong.Context) error {
-	name := s.HostName
-	if name == "" {
-		h, _ := os.Hostname()
-		name = h
-	}
-	base := s.BasePath
-	if base == "" {
-		base, _ = os.Getwd()
-	}
-	tunCfg := tunnel.Config{
+type ServeCmd struct {
+	ServeFlags
+}
+
+func (s *ServeCmd) Run(ctx *kong.Context) error {
+	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID, tunnel.Config{
 		Enabled:  s.TunnelEnabled,
 		Name:     s.TunnelName,
 		Hostname: s.TunnelHostname,
 		URL:      s.TunnelURL,
 		Token:    s.TunnelToken,
+	}, true)
+}
+
+type SetupCmd struct {
+	ServeFlags
+}
+
+func runServe(sessionID, hostName, basePath, windowID string, frontmost bool, pid int, tunCfg tunnel.Config, block bool) error {
+	sessionID = resolveSessionID(sessionID)
+	name := hostName
+	if name == "" {
+		h, _ := os.Hostname()
+		name = h
+	}
+	base := basePath
+	if base == "" {
+		base, _ = os.Getwd()
 	}
 	tunCfg.Normalize()
 	store := keychain.DefaultStore()
 	if tunCfg.Enabled {
-		if err := saveTunnelConfig(store, s.SessionID, tunCfg); err != nil {
+		if err := saveTunnelConfig(store, sessionID, tunCfg); err != nil {
 			return err
 		}
 	}
 	cfg := agent.Config{
 		Addr:      "127.0.0.1:24109",
-		SessionID: s.SessionID,
+		SessionID: sessionID,
 		HostName:  name,
 		BasePath:  base,
 		Store:     store,
-		Metadata:  buildSessionMetadata(s.SessionID, s.WindowID, s.Frontmost, s.PID),
+		Metadata:  buildSessionMetadata(sessionID, windowID, frontmost, pid),
 		Tunnel:    tunCfg,
 	}
 	ag, err := agent.New(cfg)
@@ -99,16 +115,28 @@ func (s *SetupCmd) Run(ctx *kong.Context) error {
 		return err
 	}
 	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("Sessão inicializada: %s\n", s.SessionID)
-	fmt.Printf("Host: %s (%s)\n", name, ag.Registry().HostID())
-	fmt.Printf("Agente: http://%s\n", ag.ListenAddr())
-	fmt.Printf("Sandbox: %s\n", base)
-	if tunCfg.Enabled {
-		fmt.Printf("Tunnel: habilitado (%s -> %s)\n", tunCfg.Hostname, tunCfg.URL)
+	if block {
+		fmt.Printf("Sessão inicializada: %s\n", sessionID)
+		fmt.Printf("Host: %s (%s)\n", name, ag.Registry().HostID())
+		fmt.Printf("Agente: http://%s\n", ag.ListenAddr())
+		fmt.Printf("Sandbox: %s\n", base)
+		if tunCfg.Enabled {
+			fmt.Printf("Tunnel: habilitado (%s -> %s)\n", tunCfg.Hostname, tunCfg.URL)
+		}
+		fmt.Println("Identidade e token local salvos no Keychain. O agente continua rodando.")
+		<-ag.Done()
 	}
-	fmt.Println("Identidade e token local salvos no Keychain. O agente continua rodando.")
-	<-ag.Done()
 	return nil
+}
+
+func (s *SetupCmd) Run(ctx *kong.Context) error {
+	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID, tunnel.Config{
+		Enabled:  s.TunnelEnabled,
+		Name:     s.TunnelName,
+		Hostname: s.TunnelHostname,
+		URL:      s.TunnelURL,
+		Token:    s.TunnelToken,
+	}, true)
 }
 
 type ShareCmd struct {
@@ -118,20 +146,36 @@ type ShareCmd struct {
 	PID       int    `env:"RELAY_TARGET_PID" help:"PID alvo da sessão; default seguro é o processo pai."`
 	QROut     string `help:"Caminho do PNG QR. Default: relay-pair-<sessao>.png no cwd."`
 	NoTunnel  bool   `help:"Não inicia o tunnel mesmo que configurado."`
+	NoStart   bool   `help:"Não sobe o agente se ele estiver parado; erro claro."`
 }
 
 func (s *ShareCmd) Run(ctx *kong.Context) error {
-	if s.SessionID == "" {
-		s.SessionID = defaultSessionID()
-	}
-	if s.SessionID == "" {
-		return fmt.Errorf("RELAY_SESSION_ID necessário quando CODEX_THREAD_ID/MAESTRI_TERMINAL_ID não existem")
-	}
-	store := keychain.DefaultStore()
-	token, err := resolveLocalToken(s.LocalToken, s.SessionID, store)
+	selfExe, err := os.Executable()
 	if err != nil {
 		return err
 	}
+	s.SessionID = resolveSessionID(s.SessionID)
+	fmt.Printf("Sessão: %s\n", s.SessionID)
+	if s.NoStart {
+		if !agentHealthy(s.Addr) {
+			return fmt.Errorf("agente não está no ar; rode sem --no-start ou inicie com 'relay serve %s'", s.SessionID)
+		}
+	} else {
+		startedAgent, err := ensureAgentRunning(selfExe, s.SessionID, s.Addr, defaultAgentStartTimeout)
+		if err != nil {
+			return err
+		}
+		if startedAgent {
+			fmt.Println("Agente iniciado em background.")
+		}
+	}
+
+	store := keychain.DefaultStore()
+	token, err := ensureLocalToken(s.LocalToken, s.SessionID, store, defaultAgentStartTimeout)
+	if err != nil {
+		return err
+	}
+
 	if !s.NoTunnel {
 		if err := requestTunnelStart(s.Addr, token); err != nil {
 			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
@@ -175,6 +219,11 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	fmt.Println(string(env.Payload))
 	fmt.Printf("QR local one-time: %s\n", qrPath)
 	fmt.Printf("Payload local one-time gerado para %s. Expira em 2 minutos.\n", s.SessionID)
+	if ip := localIP(); ip != "" {
+		fmt.Printf("Abra no celular (mesma rede): http://%s:24109\n", ip)
+	} else {
+		fmt.Printf("Abra no celular: http://127.0.0.1:24109\n")
+	}
 	return nil
 }
 
@@ -313,6 +362,15 @@ func postAgent(addr, path string, data []byte, localToken string) ([]byte, error
 	return b, nil
 }
 
+const defaultAgentStartTimeout = 10 * time.Second
+
+func resolveSessionID(id string) string {
+	if id != "" {
+		return id
+	}
+	return defaultSessionID()
+}
+
 func defaultSessionID() string {
 	if v := os.Getenv("CODEX_THREAD_ID"); v != "" {
 		return "codex-" + v
@@ -320,7 +378,94 @@ func defaultSessionID() string {
 	if v := os.Getenv("MAESTRI_TERMINAL_ID"); v != "" {
 		return "maestri-" + v
 	}
-	return ""
+	return "default"
+}
+
+var (
+	agentStartFunc = defaultAgentStart
+	agentHealthy   = defaultAgentHealthy
+)
+
+func defaultAgentStart(selfExe, sessionID string) (*os.Process, error) {
+	cmd := exec.Command(selfExe, "serve", sessionID)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Stdin = nil
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
+	if err := cmd.Start(); err == nil {
+		return cmd.Process, nil
+	} else {
+		// fallback nohup com log em tmp
+		logPath := filepath.Join(os.TempDir(), fmt.Sprintf("relay-serve-%s.log", sessionID))
+		logFile, errOpen := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if errOpen != nil {
+			return nil, fmt.Errorf("falha ao iniciar agente (%w) e ao abrir log fallback: %v", err, errOpen)
+		}
+		cmd2 := exec.Command("nohup", selfExe, "serve", sessionID)
+		cmd2.Stdout = logFile
+		cmd2.Stderr = logFile
+		cmd2.Stdin = nil
+		if cmd2.SysProcAttr == nil {
+			cmd2.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd2.SysProcAttr.Setsid = true
+		if err2 := cmd2.Start(); err2 != nil {
+			_ = logFile.Close()
+			return nil, fmt.Errorf("falha ao iniciar agente (%w) e fallback nohup (%v); log: %s", err, err2, logPath)
+		}
+		return cmd2.Process, nil
+	}
+}
+
+func defaultAgentHealthy(addr string) bool {
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func ensureAgentRunning(selfExe, sessionID, addr string, timeout time.Duration) (bool, error) {
+	if agentHealthy(addr) {
+		return false, nil
+	}
+	proc, err := agentStartFunc(selfExe, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("falha ao iniciar agente: %w", err)
+	}
+	if err := proc.Release(); err != nil {
+		return false, fmt.Errorf("falha ao liberar processo agente: %w", err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if agentHealthy(addr) {
+			return true, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return true, fmt.Errorf("agente não respondeu em %s após %v", addr, timeout)
+}
+
+func ensureLocalToken(override, sessionID string, store keychain.Store, timeout time.Duration) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if token, err := agent.LoadLocalToken(store, sessionID); err == nil && token != "" {
+			return token, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if agentHealthy("127.0.0.1:24109") {
+		return "", fmt.Errorf("agente já está no ar com outra sessão; rode: relay stop && relay share")
+	}
+	return "", fmt.Errorf("token local não encontrado no Keychain para %s", sessionID)
 }
 
 func resolveLocalToken(override, sessionID string, store keychain.Store) (string, error) {
@@ -439,11 +584,26 @@ func buildSessionMetadata(sessionID, windowID string, frontmost bool, targetPID 
 	return meta
 }
 
+func localIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				return ipNet.IP.String()
+			}
+		}
+	}
+	return ""
+}
+
 func main() {
 	var cli CLI
 	ctx := kong.Parse(&cli,
 		kong.Name("relay"),
-		kong.Description("Relay CLI — Marco 2"),
+		kong.Description("Relay CLI — Remote CliControl"),
 		kong.UsageOnError(),
 		kong.Vars{"version": version},
 	)
