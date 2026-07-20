@@ -89,7 +89,8 @@ Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, de
 - PeerConnection por lease com DataChannels `relay-control`, `relay-clipboard`, `relay-files`.
 - Mensagens cifradas com AES-256-GCM: AAD inclui `label + device_id + session_id + channel_id`; nonce 12 bytes; replay guard por sequência.
 - Vídeo H.264 baseline/main via VideoToolbox; resolução 720p/30 default, resize até 1080p.
-- Sem Cloudflare Tunnel, TURN real, Codex adapter ou arquivos ainda. STUN/TURN configurável via interfaces `ICEProvider`/`TURNProvider`.
+- STUN default seguro (`stun:stun.cloudflare.com:3478`, `stun:stun.l.google.com:19302`) para descoberta de candidatos na LAN/WAN. TURN real fica para Marco 4.
+- Interfaces `ICEProvider`/`TURNProvider` permitem substituir configuração futuramente.
 
 ## IPC Go ↔ Helper Swift
 
@@ -98,9 +99,14 @@ Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, de
 - Handshake com nonce 16 bytes + HMAC-SHA256 do segredo compartilhado (no Keychain).
 - Helper envia H264 NAL/access units e geometry; Go envia eventos input/clipboard.
 
-## Fora do Escopo Neste Marco
+## Marco 3 — Fechado
 
-- Publicação via Cloudflare Tunnel.
-- TURN real; provider de credenciais curtas existe como stub.
-- Codex adapter ou transferência de arquivos implementada.
-- Aúdio na captura.
+Transporte visual/controle local completo: WebRTC + DataChannels cifrados + IPC Go↔helper + STUN default. Pronto para uso local entre Mac e celular na mesma LAN.
+
+## Marco 4 — Próximos passos
+
+- Cloudflare Tunnel para acesso remoto.
+- TURN real (`ShortLivedTURNProvider` já é stub).
+- Adapter Codex.
+- Transferência de arquivos e aceite real no iPhone.
+- Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado.

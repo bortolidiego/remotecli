@@ -20,11 +20,15 @@ type TURNProvider interface {
 	ICECredentials(ctx context.Context) (username, password string, urls []string, ttl time.Duration, err error)
 }
 
-// DefaultICEProvider retorna lista vazia — conexão local apenas.
+// DefaultICEProvider retorna STUN públicos seguros para descoberta de candidatos
+// em LAN/WAN. Não inclui TURN; TURN real fica para Marco 4.
 type DefaultICEProvider struct{}
 
 func (DefaultICEProvider) Servers() ([]webrtc.ICEServer, error) {
-	return nil, nil
+	return []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.cloudflare.com:3478"}},
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+	}, nil
 }
 
 // StaticICEProvider retorna uma lista fixa sem secrets dinâmicos.
@@ -71,7 +75,7 @@ func (p *ShortLivedTURNProvider) ICECredentials(ctx context.Context) (string, st
 
 // CompositeICEProvider combina default + TURN quando configurado.
 type CompositeICEProvider struct {
-	base webrtc.ICEServer
+	base []webrtc.ICEServer
 	turn TURNProvider
 }
 
@@ -80,10 +84,22 @@ func NewCompositeICEProvider(base ICEProvider, turn TURNProvider) (*CompositeICE
 	if base == nil {
 		base = DefaultICEProvider{}
 	}
-	return &CompositeICEProvider{turn: turn}, nil
+	servers, err := base.Servers()
+	if err != nil {
+		return nil, err
+	}
+	if len(servers) == 0 {
+		return nil, errors.New("base ICE provider vazio")
+	}
+	return &CompositeICEProvider{base: servers, turn: turn}, nil
 }
 
 func (c *CompositeICEProvider) Servers() ([]webrtc.ICEServer, error) {
-	// CompositeICEProvider ainda não aplicado neste marco.
-	return nil, nil
+	// Aplica base + TURN se configurado. TURN real é Marco 4.
+	servers := append([]webrtc.ICEServer(nil), c.base...)
+	if c.turn != nil {
+		// Stub: em Marco 4 chamar c.turn.ICECredentials(...).
+		// Hoje mantemos TURN fora para não expor secrets.
+	}
+	return servers, nil
 }

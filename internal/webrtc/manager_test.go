@@ -180,7 +180,13 @@ func TestICEServersDefault(t *testing.T) {
 	cfg := Config{DeviceID: "d", SessionID: "s", SharedKey: make([]byte, 32)}
 	servers, err := cfg.ICEServers()
 	require.NoError(t, err)
-	require.Empty(t, servers)
+	require.NotEmpty(t, servers)
+	urls := 0
+	for _, s := range servers {
+		urls += len(s.URLs)
+	}
+	require.GreaterOrEqual(t, urls, 2)
+	require.Contains(t, servers[0].URLs, "stun:stun.cloudflare.com:3478")
 }
 
 func TestAddVideoTrackFailsWithNil(t *testing.T) {

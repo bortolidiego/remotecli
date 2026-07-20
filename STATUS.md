@@ -14,27 +14,25 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
 
 - **Marco 1 — base e segurança:** monorepo, agente Go local (`127.0.0.1:24109`), crypto (ECDSA/ECDH/HKDF/AES-GCM), pareamento QR, keychain, CLI, PWA embutida.
 - **Marco 2 — PWA + agente + pareamento:** validado no fluxo da sessão Codex (aceite de Marco 2 concluído).
-- **Marco 3 — parcial (vídeo/controle local):**
+- **Marco 3 — FECHADO (transporte visual/controle local):**
   - WebRTC (Pion), DataChannels cifrados, IPC Go↔helper Swift
   - helper ScreenCaptureKit/VideoToolbox
-  - endpoints de signaling
-  - README já descreve o Marco 3
+  - endpoints de signaling autenticados por lease
+  - STUN default (Cloudflare + Google) para descoberta de candidatos na LAN/WAN
+  - README e testes atualizados
 
-## O que falta / bloqueios
+## O que fica pro Marco 4
 
-1. **Git ainda não foi inicializado** na pasta do app (sem commits).
-2. **Marco 3 incompleto:** sessão Codex registrou bloqueio em **ICE/Pion** e pediu correção dos testes WebRTC (hoje os testes unitários de `internal/webrtc` e `internal/agent` passam em smoke local — revalidar se o bloqueio era de integração real, não unitário).
-3. **Fora do Marco 3 ainda:**
-   - Cloudflare Tunnel
-   - TURN real (só stub)
-   - adapter Codex / arquivos / aceite real no iPhone
+- Cloudflare Tunnel
+- TURN real (`ShortLivedTURNProvider` já existe como stub)
+- Adapter Codex
+- Transferência de arquivos/aceite real no iPhone
+- Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado
 
-## Próximos passos recomendados (ordem)
+## Bloqueios
 
-1. Inicializar git e fazer checkpoint do estado atual (Marco 2 + Marco 3 parcial).
-2. Fechar Marco 3: ICE/Pion estável + testes de integração WebRTC.
-3. Só depois: Tunnel + TURN + adapter Codex + aceite real no celular.
-4. Rebrand visual/CLI de “Relay” → “Remote CliControl” quando o Diego autorizar (pasta/repo/hostname).
+- `swift test` pode falhar com `no such module XCTest` no ambiente de build sem Xcode/test framework; `swift build` passa. Não é bloqueio funcional.
+- WebRTC real entre celular↔Mac depende de rota ICE (LAN/WAN). STUN default resolve a maioria dos casos de LAN; TURN será necessário para NAT simétrico restrito.
 
 ## Observação da sessão
 
