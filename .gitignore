@@ -1,0 +1,34 @@
+# Binários
+/relay
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+vendor/
+
+# Node
+node_modules/
+apps/web/dist/
+*.log
+npm-debug.log*
+
+# Swift
+.build/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets locais
+*.pem
+*.key
+.env
+.env.*
