@@ -111,3 +111,8 @@ func TestEnsureAgentRunningStartsOnlyIfNeeded(t *testing.T) {
 func TestDefaultQRPath(t *testing.T) {
 	require.Contains(t, defaultQRPath("sess/1"), "relay-pair-sess-1")
 }
+
+func TestPrintQRTerminal(t *testing.T) {
+	// só garante que gera sem erro (saída vai pro stdout do teste)
+	require.NoError(t, printQRTerminal("https://192.168.1.1:24109/?offer=test"))
+}

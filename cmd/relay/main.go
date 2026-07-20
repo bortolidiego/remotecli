@@ -204,9 +204,19 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if err != nil {
 		return err
 	}
-	var env contracts.SignedEnvelope
-	if err := json.Unmarshal(body, &env); err != nil {
+	var offerResp struct {
+		Payload   []byte `json:"payload"`
+		Signature []byte `json:"signature"`
+		SignerKey []byte `json:"signer_key"`
+		ClaimCode string `json:"claim_code"`
+	}
+	if err := json.Unmarshal(body, &offerResp); err != nil {
 		return err
+	}
+	env := contracts.SignedEnvelope{
+		Payload:   offerResp.Payload,
+		Signature: offerResp.Signature,
+		SignerKey: offerResp.SignerKey,
 	}
 	offer, err := pairing.VerifySignedOffer(env, time.Now())
 	if err != nil {
@@ -216,21 +226,21 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if qrPath == "" {
 		qrPath = defaultQRPath(s.SessionID)
 	}
-	qrURL := buildOfferURL(offer.Endpoint, body)
+	// QR curto no terminal (código de claim) — o celular busca o envelope em /api/claim.
+	qrURL := buildClaimURL(offer.Endpoint, offerResp.ClaimCode)
 	if err := writeQRCode(qrPath, qrURL); err != nil {
 		return err
 	}
-	fmt.Println(qrURL)
-	fmt.Println(string(body))
-	fmt.Println(string(env.Payload))
-	fmt.Printf("QR local one-time: %s\n", qrPath)
-	fmt.Printf("URL do QR expira em 2 minutos. Endpoint: %s\n", offer.Endpoint)
-	fmt.Println("No iPhone: aceite o aviso de certificado (HTTPS local) e toque em Parear.")
-	if ip := localIP(); ip != "" {
-		fmt.Printf("Abra no celular (mesma rede): https://%s:24109\n", ip)
-	} else {
-		fmt.Printf("Abra no celular: https://127.0.0.1:24109\n")
+	fmt.Println()
+	fmt.Println("Escaneie com o celular (mesma Wi‑Fi):")
+	fmt.Println()
+	if err := printQRTerminal(qrURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Aviso: não foi possível desenhar o QR no terminal: %v\n", err)
 	}
+	fmt.Println()
+	fmt.Printf("Link: %s\n", qrURL)
+	fmt.Printf("PNG (opcional): %s\n", qrPath)
+	fmt.Println("Oferta expira em 2 minutos. No iPhone: aceite o certificado HTTPS e toque em Parear.")
 	return nil
 }
 
@@ -604,12 +614,39 @@ func writeQRCode(path, payload string) error {
 	return qrcode.WriteFile(payload, qrcode.Medium, 320, path)
 }
 
+// printQRTerminal desenha o QR no próprio CLI (sem abrir Preview/Finder).
+func printQRTerminal(content string) error {
+	if content == "" {
+		return fmt.Errorf("conteúdo QR vazio")
+	}
+	q, err := qrcode.New(content, qrcode.Medium)
+	if err != nil {
+		return err
+	}
+	q.DisableBorder = false
+	// ToSmallString usa meia-altura — cabe melhor no terminal do celular/CLI.
+	fmt.Print(q.ToSmallString(false))
+	return nil
+}
+
 func buildOfferURL(endpoint string, envelope []byte) string {
 	u := endpoint
 	if u == "" {
-		u = "http://127.0.0.1:24109"
+		u = "https://127.0.0.1:24109"
 	}
 	return u + "/?offer=" + url.QueryEscape(string(envelope))
+}
+
+// buildClaimURL monta QR curto: o envelope completo fica no agente até o claim.
+func buildClaimURL(endpoint, claimCode string) string {
+	u := endpoint
+	if u == "" {
+		u = "https://127.0.0.1:24109"
+	}
+	if claimCode == "" {
+		return u + "/"
+	}
+	return strings.TrimRight(u, "/") + "/?c=" + url.QueryEscape(claimCode)
 }
 
 func buildSessionMetadata(sessionID, windowID string, frontmost bool, targetPID int) contracts.SessionMetadata {

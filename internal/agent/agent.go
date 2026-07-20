@@ -58,6 +58,15 @@ type Agent struct {
 
 	// disableTLS força HTTP (apenas testes). Em produção o agente usa HTTPS local.
 	disableTLS bool
+
+	// claims: códigos curtos no QR do terminal → envelope completo (TTL da oferta).
+	claimMu sync.Mutex
+	claims  map[string]claimEntry
+}
+
+type claimEntry struct {
+	envelope []byte
+	expires  time.Time
 }
 
 // New cria o agente, carregando ou criando identidade no Keychain.
@@ -103,11 +112,12 @@ func New(cfg Config) (*Agent, error) {
 		sessionID:    cfg.SessionID,
 		basePath:     cfg.BasePath,
 		localToken:   localToken,
-		disableTLS:   cfg.DisableTLS,
-		stopped:      make(chan struct{}),
+		disableTLS:    cfg.DisableTLS,
+		stopped:       make(chan struct{}),
 		tunnel:        tun,
 		tunnelConfig:  cfg.Tunnel,
 		tunnelRunner_: cfg.TunnelRunner,
+		claims:        map[string]claimEntry{},
 	}
 	peerMgr, err := NewPeerManager(a)
 	if err != nil {
@@ -118,6 +128,8 @@ func New(cfg Config) (*Agent, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/api/offer", a.requireLocal(a.handleOffer))
+	// Público (pairing-only): troca código curto do QR por envelope assinado.
+	mux.HandleFunc("/api/claim", a.handleClaim)
 	mux.HandleFunc("/api/metadata", a.requireLocal(a.handleMetadata))
 	mux.HandleFunc("/api/stop", a.requireLocal(a.handleStop))
 	mux.HandleFunc("/api/tunnel/start", a.requireLocal(a.handleTunnelStart))
@@ -468,11 +480,85 @@ func (a *Agent) handleOffer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, contracts.SignedEnvelope{
+	env := contracts.SignedEnvelope{
 		Payload:   mustJSON(offer),
 		Signature: sig,
 		SignerKey: offer.HostKey,
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	code, err := a.putClaim(raw, offer.ExpiresAt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"payload":    env.Payload,
+		"signature":  env.Signature,
+		"signer_key": env.SignerKey,
+		"claim_code": code,
 	})
+}
+
+// handleClaim é público: devolve o envelope assinado a partir do código curto do QR.
+func (a *Agent) handleClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	code := strings.TrimSpace(r.URL.Query().Get("c"))
+	if code == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "código c obrigatório"})
+		return
+	}
+	raw, ok := a.takeClaim(code)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "código inválido ou expirado"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (a *Agent) putClaim(envelope []byte, expires time.Time) (string, error) {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 6)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	code := make([]byte, 6)
+	for i := range b {
+		code[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	s := string(code)
+	a.claimMu.Lock()
+	a.claims[s] = claimEntry{envelope: append([]byte(nil), envelope...), expires: expires}
+	// limpa expirados
+	now := time.Now()
+	for k, v := range a.claims {
+		if now.After(v.expires) {
+			delete(a.claims, k)
+		}
+	}
+	a.claimMu.Unlock()
+	return s, nil
+}
+
+func (a *Agent) takeClaim(code string) ([]byte, bool) {
+	a.claimMu.Lock()
+	defer a.claimMu.Unlock()
+	e, ok := a.claims[code]
+	if !ok || time.Now().After(e.expires) {
+		delete(a.claims, code)
+		return nil, false
+	}
+	// one-time
+	delete(a.claims, code)
+	return e.envelope, true
 }
 
 func (a *Agent) handleMetadata(w http.ResponseWriter, r *http.Request) {

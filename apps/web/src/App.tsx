@@ -47,11 +47,33 @@ export default function App() {
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(() => pairState && ({ deviceId: pairState.deviceId, leaseToken: pairState.leaseToken }), [pairState])
 
-  // Carrega oferta via ?offer= na URL (QR code). URLSearchParams já decodifica uma vez.
+  // Carrega oferta via QR: ?c=código curto (preferido) ou ?offer=envelope completo.
   useEffect(() => {
+    if (pairState) return
     const params = new URLSearchParams(window.location.search)
+    const claim = params.get('c')
     const offerParam = params.get('offer')
-    if (offerParam && !pairState) {
+    if (claim) {
+      void (async () => {
+        try {
+          const res = await fetch(`/api/claim?c=${encodeURIComponent(claim)}`, {
+            headers: { Accept: 'application/json' },
+          })
+          if (!res.ok) {
+            setMessage(`QR inválido ou expirado (${res.status}). Rode relay share de novo.`)
+            return
+          }
+          const text = await res.text()
+          setOffer(text)
+          setScannedOffer(text)
+          setMessage('Oferta do QR carregada. Toque em Parear.')
+        } catch (err) {
+          setMessage(String(err))
+        }
+      })()
+      return
+    }
+    if (offerParam) {
       setOffer(offerParam)
       setScannedOffer(offerParam)
       setMessage('Oferta detectada no QR. Confirme o pareamento abaixo.')
