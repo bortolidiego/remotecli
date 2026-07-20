@@ -774,18 +774,17 @@ func (a *Agent) handleLeaseRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 		return
 	}
+	// Idempotente: se o lease já morreu (agente reiniciado / expirado), ainda responde OK
+	// para o celular poder limpar o estado local sem ficar preso.
 	deviceID := r.Header.Get("X-Relay-Device-ID")
 	lease := r.Header.Get("X-Relay-Lease-Token")
-	if !a.registry.ValidateLease(lease, deviceID) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "lease inválido"})
-		return
+	if a.registry.ValidateLease(lease, deviceID) {
+		_ = a.registry.ReleaseLease(deviceID)
+		if a.peerManager != nil {
+			a.peerManager.ReleasePeer(deviceID)
+		}
 	}
-	if a.registry.ReleaseLease(deviceID) {
-		a.peerManager.ReleasePeer(deviceID)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
-		return
-	}
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": "device não encontrado"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
 }
 
 func (a *Agent) handleRead(w http.ResponseWriter, r *http.Request) {

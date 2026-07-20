@@ -285,19 +285,32 @@ export default function App() {
   }
 
   async function releaseCurrentLease() {
-    if (!auth) return
+    // Sempre limpa o celular — mesmo se o Mac já reiniciou / lease expirou (401).
+    const previous = auth
     try {
-      await releaseLease(auth)
-      localStorage.removeItem(STORED_PAIR)
-      setPairState(null)
-      setStatus(null)
-      setSessions([])
-      setDetail(null)
-      setSelectedId(null)
-      setMessage('Lease liberado neste dispositivo.')
-    } catch (err) {
-      setMessage(String(err))
+      if (previous) {
+        await releaseLease(previous)
+      }
+    } catch {
+      // ignorar erro de rede/lease morto
     }
+    try {
+      signalingRef.current?.close().catch(() => {})
+    } catch {
+      /* ignore */
+    }
+    signalingRef.current = null
+    localStorage.removeItem(STORED_PAIR)
+    setPairState(null)
+    setStatus(null)
+    setSessions([])
+    setDetail(null)
+    setSelectedId(null)
+    setRemoteStream(null)
+    setDataChannelOpen(false)
+    setRtcState('idle')
+    setSelectedApproval(null)
+    setMessage('Desconectado. Emparelhe de novo com um QR atualizado.')
   }
 
   if (offline) {
