@@ -32,3 +32,5 @@ npm-debug.log*
 *.key
 .env
 .env.*
+relay
+relay-pair-*.png

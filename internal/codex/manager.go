@@ -76,7 +76,7 @@ func (m *Manager) StartTurn(ctx context.Context, threadID, text string) (string,
 	return c.TurnStart(ctx, threadID, text)
 }
 
-// Interrupt interrompe o turno atual.
+// Interrupt interrompe o turno atual (usa turn ativo da thread se turnID vazio).
 func (m *Manager) Interrupt(ctx context.Context, threadID string) error {
 	c, ok := m.Get(threadID)
 	if !ok {
@@ -89,13 +89,25 @@ func (m *Manager) Interrupt(ctx context.Context, threadID string) error {
 	return c.TurnInterrupt(ctx, threadID, info.TurnID)
 }
 
-// Events retorna eventos de uma thread.
+// ActiveTurnID retorna o último turn_id conhecido de uma thread.
+func (m *Manager) ActiveTurnID(threadID string) string {
+	c, ok := m.Get(threadID)
+	if !ok {
+		return ""
+	}
+	if info := c.ThreadInfo(threadID); info != nil {
+		return info.TurnID
+	}
+	return ""
+}
+
+// Events retorna eventos de uma thread (nunca nil).
 func (m *Manager) Events(threadID string) []Event {
 	c, ok := m.Get(threadID)
 	if !ok {
-		return nil
+		return []Event{}
 	}
-	var out []Event
+	out := make([]Event, 0)
 	for _, e := range c.Events() {
 		if e.ThreadID == threadID {
 			out = append(out, e)
@@ -104,13 +116,13 @@ func (m *Manager) Events(threadID string) []Event {
 	return out
 }
 
-// Approvals retorna aprovações pendentes de uma thread.
+// Approvals retorna aprovações pendentes de uma thread (nunca nil).
 func (m *Manager) Approvals(threadID string) []Approval {
 	c, ok := m.Get(threadID)
 	if !ok {
-		return nil
+		return []Approval{}
 	}
-	var out []Approval
+	out := make([]Approval, 0)
 	for _, a := range c.Approvals() {
 		if a.ThreadID == threadID {
 			out = append(out, a)

@@ -53,3 +53,23 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
 
 - Pedido “salva na memória” falhou no Codex por **cota de uso do Codex**, não por falha do app.
 - Este arquivo é o registro local durável até a memória Hindsight gravar de novo.
+
+## Teste real (2026-07-20)
+
+Rodado no Mac com agente local `127.0.0.1:24109` + Codex App Server real (`ipc.sock`) + thread `019f7c05-24b5-7a40-8909-61c17c41c07a`:
+
+| Passo | Resultado |
+|---|---|
+| `relay setup` | OK — agente sobe, token no Keychain |
+| `GET /health` | OK — sem metadados privados |
+| `relay share` | OK — envelope + QR one-time |
+| `GET /api/status` sem token | 401 |
+| Sessão com `codexThreadId` | OK |
+| `POST .../turn` | OK — `thread/resume` + `turn/started` + `turn/completed` no app-server real |
+| `turn_id` na resposta | OK após hotfix (parse `turn.id`) |
+| `POST .../interrupt` | OK |
+| PWA HTML em `/` | OK (200) |
+| Pareamento WebCrypto no iPhone | não exercitado neste smoke (precisa do celular/QR) |
+| Tunnel Cloudflare | não exercitado (sem token) |
+
+Agente de smoke pode ser parado com `./relay stop` na sessão correspondente.

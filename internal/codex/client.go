@@ -127,15 +127,7 @@ func (c *Client) TurnStart(ctx context.Context, threadID, text string) (string, 
 	if err != nil {
 		return "", err
 	}
-	turnID := ""
-	if resp.Result != nil {
-		var result struct {
-			TurnID string `json:"turnId"`
-		}
-		if err := json.Unmarshal(resp.Result, &result); err == nil {
-			turnID = result.TurnID
-		}
-	}
+	turnID := extractTurnID(resp.Result)
 	c.mu.Lock()
 	info := c.threads[threadID]
 	if info == nil {
@@ -407,16 +399,40 @@ func (c *Client) normalizeAndEmit(msg jsonRPCMessage, raw []byte) {
 	case msg.Method == "turn/started", msg.Method == "turn/completed", msg.Method == "turn/interrupted":
 		e.Kind = EventKindStatus
 		var p struct {
-			ThreadID string `json:"threadId"`
-			TurnID   string `json:"turnId"`
+			ThreadID string          `json:"threadId"`
+			TurnID   string          `json:"turnId"`
+			Turn     json.RawMessage `json:"turn"`
 		}
 		_ = json.Unmarshal(msg.Params, &p)
 		e.ThreadID = p.ThreadID
 		e.TurnID = p.TurnID
-		// Normalização: se resumir uma thread busy, passa a waiting_local.
+		if e.TurnID == "" && p.Turn != nil {
+			var t struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(p.Turn, &t)
+			e.TurnID = t.ID
+		}
+		// Atualiza thread state em turn/started/completed/interrupted.
 		c.mu.Lock()
 		info := c.threads[p.ThreadID]
-		if info != nil && info.Status == "busy" && msg.Method == "thread/resume" {
+		if info == nil {
+			info = &ThreadInfo{ThreadID: p.ThreadID}
+			c.threads[p.ThreadID] = info
+		}
+		if e.TurnID != "" {
+			info.TurnID = e.TurnID
+		}
+		switch msg.Method {
+		case "turn/started":
+			info.Status = "busy"
+		case "turn/completed":
+			info.Status = "completed"
+		case "turn/interrupted":
+			info.Status = "interrupted"
+		}
+		// Normalização: se resumir uma thread busy, passa a waiting_local.
+		if info.Status == "busy" && msg.Method == "thread/resume" {
 			info.Status = "waiting_local"
 			e.Status = "waiting_local"
 		}
@@ -450,6 +466,29 @@ func (c *Client) emit(e Event) {
 	if onEvent != nil {
 		go onEvent(e)
 	}
+}
+
+// extractTurnID lê tanto {"turnId":"..."} quanto {"turn":{"id":"..."}}.
+func extractTurnID(result json.RawMessage) string {
+	if result == nil {
+		return ""
+	}
+	var top struct {
+		TurnID string          `json:"turnId"`
+		Turn   json.RawMessage `json:"turn"`
+	}
+	if err := json.Unmarshal(result, &top); err == nil && top.TurnID != "" {
+		return top.TurnID
+	}
+	if top.Turn != nil {
+		var nested struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(top.Turn, &nested); err == nil {
+			return nested.ID
+		}
+	}
+	return ""
 }
 
 func containsAny(s string, subs ...string) bool {

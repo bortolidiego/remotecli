@@ -215,6 +215,47 @@ func TestApprovalHandlerCanStillAutoDecline(t *testing.T) {
 	require.NoError(t, c.Close(ctx))
 }
 
+func TestExtractTurnIDNestedAndTopLevel(t *testing.T) {
+	require.Equal(t, "turn-top", extractTurnID(json.RawMessage(`{"turnId":"turn-top"}`)))
+	require.Equal(t, "turn-nested", extractTurnID(json.RawMessage(`{"turn":{"id":"turn-nested","status":"inProgress"}}`)))
+	require.Equal(t, "turn-top", extractTurnID(json.RawMessage(`{"turnId":"turn-top","turn":{"id":"turn-nested"}}`)))
+	require.Equal(t, "", extractTurnID(nil))
+}
+
+func TestTurnStartedEventFillsTurnIDFromTurnObject(t *testing.T) {
+	fake := NewFakeTransport(10)
+	c := NewClient(fake, nil)
+
+	fake.OnSend(func(data []byte) {
+		var req jsonRPCMessage
+		require.NoError(t, json.Unmarshal(data, &req))
+		if req.Method == "initialize" {
+			fake.InjectMessage(mustJSON(jsonRPCMessage{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"ok":true}`)}))
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, c.Initialize(ctx))
+
+	fake.InjectMessage(mustJSON(jsonRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "turn/started",
+		Params:  json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-live","status":"inProgress"}}`),
+	}))
+	time.Sleep(50 * time.Millisecond)
+
+	info := c.ThreadInfo("thread-1")
+	require.NotNil(t, info)
+	require.Equal(t, "turn-live", info.TurnID)
+	require.Equal(t, "busy", info.Status)
+
+	events := c.Events()
+	require.Len(t, events, 1)
+	require.Equal(t, "turn-live", events[0].TurnID)
+	require.NoError(t, c.Close(ctx))
+}
+
 func TestResolveDecision(t *testing.T) {
 	d, err := ResolveDecision("approve")
 	require.NoError(t, err)
