@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -69,6 +70,10 @@ func NewPeerManager(cfg Config) (*PeerManager, error) {
 	se := webrtc.SettingEngine{}
 	se.DisableMediaEngineCopy(true)
 	se.SetHostAcceptanceMinWait(0)
+	// Força candidatos host com IPs da LAN (iPhone na mesma Wi‑Fi).
+	if ips := lanIPv4s(); len(ips) > 0 {
+		_ = se.SetNAT1To1IPs(ips, webrtc.ICECandidateTypeHost)
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers:         servers,
@@ -251,17 +256,24 @@ func (pm *PeerManager) dispatch(msgType channel.MessageType, payload []byte) {
 	}
 }
 
+func waitGather(pc *webrtc.PeerConnection, timeout time.Duration) {
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+	select {
+	case <-gatherComplete:
+	case <-time.After(timeout):
+	}
+}
+
 // CreateOffer inicia a negociação WebRTC e espera ICE gathering (SDP completo).
 func (pm *PeerManager) CreateOffer() (*webrtc.SessionDescription, error) {
 	offer, err := pm.pc.CreateOffer(nil)
 	if err != nil {
 		return nil, err
 	}
-	gatherComplete := webrtc.GatheringCompletePromise(pm.pc)
 	if err := pm.pc.SetLocalDescription(offer); err != nil {
 		return nil, err
 	}
-	<-gatherComplete
+	waitGather(pm.pc, 5*time.Second)
 	desc := pm.pc.LocalDescription()
 	if desc == nil {
 		return nil, errors.New("local description vazia após gather")
@@ -284,11 +296,10 @@ func (pm *PeerManager) SetRemoteOffer(offer webrtc.SessionDescription) (*webrtc.
 	if err != nil {
 		return nil, err
 	}
-	gatherComplete := webrtc.GatheringCompletePromise(pm.pc)
 	if err := pm.pc.SetLocalDescription(answer); err != nil {
 		return nil, err
 	}
-	<-gatherComplete
+	waitGather(pm.pc, 5*time.Second)
 	desc := pm.pc.LocalDescription()
 	if desc == nil {
 		return nil, errors.New("local description vazia após gather")
@@ -464,6 +475,24 @@ func (pm *PeerManager) WaitConnected(timeout time.Duration) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+func lanIPv4s() []string {
+	var out []string
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		if v4 := ipNet.IP.To4(); v4 != nil {
+			out = append(out, v4.String())
+		}
+	}
+	return out
 }
 
 // PeerID retorna identificador do par.

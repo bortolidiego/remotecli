@@ -80,9 +80,9 @@ export default function App() {
     }
   }, [pairState])
 
-  // Polling leve de aprovações e eventos Codex.
+  // Polling Codex só quando a sessão tem thread (evita 400 em modo "qualquer CLI").
   useEffect(() => {
-    if (!auth || !selectedId) return
+    if (!auth || !selectedId || !detail?.codexThreadId) return
     const sessionId = selectedId
     const currentAuth = auth
     let active = true
@@ -113,7 +113,7 @@ export default function App() {
       active = false
       clearInterval(id)
     }
-  }, [auth, selectedId])
+  }, [auth, selectedId, detail?.codexThreadId])
 
 
 
