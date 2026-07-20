@@ -27,11 +27,19 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
   - erros claros quando `cloudflared` ou token estão ausentes
   - CLI: `setup --tunnel-enabled` grava preferências; `share` inicia tunnel se configurado; `status` mostra tunnel; `stop` encerra agente + tunnel
   - testes unitários com runner fake; `go test ./...` e `go test -race ./internal/tunnel/...` passam
+- **Marco 4.2 — Adapter Codex:**
+  - `internal/codex`: JSON-RPC 2.0 client com transporte injetável (`stdio`, Unix socket) e `FakeTransport` para testes
+  - métodos implementados: `initialize`, `thread/resume`, `turn/start`, `turn/interrupt`
+  - aprovações `item/commandExecution/requestApproval` → `accept`/`decline` (MVP, sem `acceptForSession`)
+  - eventos normalizados em `status`, `timeline`, `error`, `approval`; resume busy vira `waiting_local`
+  - transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`)
+  - endpoints de lease no agente: `/api/sessions/{id}/turn`, `/interrupt`, `/events`, `/approvals`, `/approvals/{id}`
+  - PWA: envio/interrupção real, modal de aprovação com Permitir/Negar e polling de aprovações/eventos
+  - `go test ./...`, `go test -race ./...` e `npm test -- --run` passam
 
 ## O que fica pro Marco 4
 
 - TURN real (`ShortLivedTURNProvider` já existe como stub)
-- Adapter Codex
 - Transferência de arquivos/aceite real no iPhone
 - Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado
 

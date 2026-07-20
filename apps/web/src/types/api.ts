@@ -62,7 +62,31 @@ export interface ApprovalRequest {
   approved?: boolean
 }
 
-export type ApprovalAction = 'approve' | 'deny'
+export interface CodexApproval {
+  id: string
+  thread_id: string
+  turn_id: string
+  item_id: string
+  approval_id?: string
+  command?: string
+  cwd?: string
+  reason?: string
+  started_at_ms: number
+  created_at: string
+}
+
+export interface CodexEvent {
+  id: string
+  thread_id: string
+  turn_id?: string
+  kind: 'status' | 'timeline' | 'error' | 'approval'
+  method?: string
+  status?: string
+  text?: string
+  created_at: string
+}
+
+export type ApprovalAction = 'accept' | 'deny'
 
 export interface SignedEnvelope {
   payload: string

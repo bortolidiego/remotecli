@@ -56,6 +56,8 @@ describe('App', () => {
       sessionId: 'sess-1',
       hostId: 'host-1',
     }))
+    // Evita que o polling de aprovações/eventos abra modal com resposta vazia.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     const session = {
       id: 'host-1',
       harness: 'codex',
@@ -73,6 +75,17 @@ describe('App', () => {
       created_at: new Date().toISOString(),
       expires_at: new Date(Date.now() + 60_000).toISOString(),
     }
+    const approval = {
+      id: 'approval-1',
+      thread_id: 'thread-1',
+      turn_id: 'turn-1',
+      item_id: 'item-1',
+      command: 'cat package.json',
+      cwd: '/Users/diegobortoli/Desktop/apps/relay',
+      reason: 'Pré-visualizar um comando local antes de permitir execução única.',
+      started_at_ms: Date.now(),
+      created_at: new Date().toISOString(),
+    }
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
       if (url === '/health') {
@@ -82,15 +95,19 @@ describe('App', () => {
         return ok({ listening: true, address: '127.0.0.1:24109', version: 'relay-m2', session_id: 'sess-1', session_path: session.cwd, devices: [], sessions: [session] })
       }
       if (url === '/api/sessions') return ok([session])
-      if (url === '/api/sessions/host-1') return ok(session)
+      if (url.startsWith('/api/sessions/host-1')) {
+        if (url.includes('/approvals')) return ok([approval])
+        if (url.includes('/events')) return ok([])
+        return ok(session)
+      }
       return ok({ status: 'released' })
     })
 
     render(<App />)
 
     expect(await screen.findByText('native-1')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Enviar' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Interromper' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Enviar' })).toBeDisabled() // sem texto no prompt
+    expect(screen.getByRole('button', { name: 'Interromper' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Colar' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Arquivos' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Liberar controle' })).toBeInTheDocument()
@@ -105,10 +122,9 @@ describe('App', () => {
     expect(screen.getByRole('dialog', { name: 'Aprovação pendente' })).toBeInTheDocument()
     expect(screen.getByText('cat package.json')).toBeInTheDocument()
     expect(screen.getAllByText('/Users/diegobortoli/Desktop/apps/relay').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText(/Pré-visualizar um comando local/)).toBeInTheDocument()
-    expect(screen.getByText(/read cwd/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Aprovar uma vez' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Permitir' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Negar' })).toBeInTheDocument()
+    vi.useRealTimers()
   })
 })
 

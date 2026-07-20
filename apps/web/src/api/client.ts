@@ -1,4 +1,4 @@
-import type { AgentStatus, AuthenticatedStatus, Capability, PairResponse, SessionDescriptor, SignedEnvelope } from '../types/api'
+import type { AgentStatus, AuthenticatedStatus, Capability, CodexApproval, CodexEvent, PairResponse, SessionDescriptor, SignedEnvelope } from '../types/api'
 
 const API_PREFIX = '/api'
 const DB_NAME = 'relay-keys-v1'
@@ -51,6 +51,26 @@ export async function fetchSessions(auth: LeaseAuth | string): Promise<SessionDe
 
 export async function fetchSessionDetail(id: string, auth: LeaseAuth | string): Promise<SessionDescriptor> {
   return api(`/sessions/${encodeURIComponent(id)}`, {}, auth)
+}
+
+export async function startTurn(sessionId: string, text: string, auth: LeaseAuth | string): Promise<{ turn_id: string; status: string }> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/turn`, { method: 'POST', body: JSON.stringify({ text }) }, auth)
+}
+
+export async function interruptTurn(sessionId: string, auth: LeaseAuth | string): Promise<{ status: string }> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/interrupt`, { method: 'POST' }, auth)
+}
+
+export async function fetchEvents(sessionId: string, auth: LeaseAuth | string): Promise<CodexEvent[]> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/events`, {}, auth)
+}
+
+export async function fetchApprovals(sessionId: string, auth: LeaseAuth | string): Promise<CodexApproval[]> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/approvals`, {}, auth)
+}
+
+export async function decideApproval(sessionId: string, approvalId: string, decision: 'accept' | 'deny', auth: LeaseAuth | string): Promise<{ status: string }> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', body: JSON.stringify({ decision }) }, auth)
 }
 
 export async function releaseLease(auth: LeaseAuth): Promise<{ status: string }> {

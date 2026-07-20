@@ -1,6 +1,6 @@
-# Relay - Marco 4.1
+# Relay - Marco 4.2
 
-MVP pessoal para macOS arm64 com agente Go local, PWA embarcada/offline, CLI e helper Swift de menu bar. **Marco 4.1** adiciona scaffold do Cloudflare Tunnel (`internal/tunnel`) com manager real/fake, preferências salvas no Keychain e integração CLI.
+MVP pessoal para macOS arm64 com agente Go local, PWA embarcada/offline, CLI e helper Swift de menu bar. **Marco 4.2** adiciona o Adapter Codex (`internal/codex`) e integra turnos/aprovações na PWA.
 
 ## Estrutura
 
@@ -9,6 +9,7 @@ apps/web              React + Vite + TypeScript PWA com WebRTC/signaling
 cmd/relay             CLI Go
 internal/agent        Servidor HTTP local 127.0.0.1:24109 + signaling WebRTC
 internal/channel      Envelope AES-256-GCM com AAD e replay guard
+internal/codex        JSON-RPC client para Codex app-server (transporte stdio/socket injetável + fake)
 internal/crypto       ECDSA P-256, ECDH P-256, HKDF, AES-256-GCM
 internal/geometry     Coordenadas normalizadas entre vídeo e captura
 internal/ipc          Unix domain socket Go↔helper com framing binário
@@ -97,6 +98,7 @@ Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, de
 - Local admin: `POST /api/offer`, `POST /api/metadata`, `POST /api/revoke`, `POST /api/stop`.
 - Autenticados por local token ou lease: `GET /api/status`, `GET /api/devices`, `GET /api/sessions`, `GET /api/sessions/{id}`.
 - Lease: `POST /api/lease/release`, `GET /api/read?path=...`.
+- Codex (lease, requer sessão com `codexThreadId`): `POST /api/sessions/{id}/turn`, `POST /api/sessions/{id}/interrupt`, `GET /api/sessions/{id}/events`, `GET /api/sessions/{id}/approvals`, `POST /api/sessions/{id}/approvals/{approvalId}`.
 - WebRTC signaling (lease): `POST /api/webrtc/offer`, `POST /api/webrtc/answer`, `POST /api/webrtc/ice`, `GET /api/webrtc/status`.
 
 ## Transporte WebRTC
@@ -127,9 +129,17 @@ Transporte visual/controle local completo: WebRTC + DataChannels cifrados + IPC 
 - CLI `setup` grava preferências; `share` inicia tunnel se configurado; `status` expõe estado; `stop` encerra agente + tunnel.
 - Testes unitários com runner fake; `go test ./...` e `-race` passam.
 
+## Marco 4.2 — Adapter Codex
+
+- `internal/codex`: JSON-RPC 2.0 client com transporte injetável (`stdio`, Unix socket) e `FakeTransport` para testes.
+- Métodos implementados: `initialize`, `thread/resume`, `turn/start`, `turn/interrupt`.
+- Aprovações: `item/commandExecution/requestApproval` → decisões `accept` ou `decline` (MVP, sem `acceptForSession`).
+- Eventos normalizados em `status`, `timeline`, `error`, `approval`; resume busy vira `waiting_local`.
+- Transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`).
+- Endpoints de lease no agente Codex e PWA com envio/interrupção real e aprovações via polling.
+
 ## Marco 4 — Próximos passos
 
 - TURN real (`ShortLivedTURNProvider` já é stub).
-- Adapter Codex.
 - Transferência de arquivos e aceite real no iPhone.
 - Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado.

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bortolidiego/relay/internal/codex"
 	"github.com/bortolidiego/relay/internal/crypto"
 	"github.com/bortolidiego/relay/internal/keychain"
 	"github.com/bortolidiego/relay/internal/pairing"
@@ -49,6 +50,9 @@ type Agent struct {
 	tunnel         *tunnel.Manager
 	tunnelConfig   tunnel.Config
 	tunnelRunner_  tunnel.ProcessRunner
+
+	codexManager *codex.Manager
+	codexMu      sync.RWMutex
 }
 
 // New cria o agente, carregando ou criando identidade no Keychain.
@@ -104,6 +108,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, err
 	}
 	a.peerManager = peerMgr
+	a.initCodexManager()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/api/offer", a.requireLocal(a.handleOffer))
@@ -115,7 +120,7 @@ func New(cfg Config) (*Agent, error) {
 	mux.HandleFunc("/api/status", a.requireAuth(a.handleStatus))
 	mux.HandleFunc("/api/devices", a.requireAuth(a.handleDevices))
 	mux.HandleFunc("/api/sessions", a.requireAuth(a.handleSessions))
-	mux.HandleFunc("/api/sessions/", a.requireAuth(a.handleSessionDetail))
+	a.registerCodexRoutes(mux)
 	mux.HandleFunc("/api/lease/release", a.requireAuth(a.handleLeaseRelease))
 	mux.HandleFunc("/api/revoke", a.handleRevoke)
 	mux.HandleFunc("/api/read", a.requireLease(a.handleRead))

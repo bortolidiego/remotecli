@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { fetchHealth, fetchSessionDetail, fetchSessions, fetchStatus, getSessionKey, pair, releaseLease, type LeaseAuth, type PairState } from './api/client'
-import { pendingApprovalFixture, type ApprovalFixture } from './fixtures/approvals'
-import type { AgentStatus, AuthenticatedStatus, SessionDescriptor } from './types/api'
+import {
+  decideApproval,
+  fetchApprovals,
+  fetchEvents,
+  fetchHealth,
+  fetchSessionDetail,
+  fetchSessions,
+  fetchStatus,
+  getSessionKey,
+  interruptTurn,
+  pair,
+  releaseLease,
+  startTurn,
+  type LeaseAuth,
+  type PairState,
+} from './api/client'
+import type { AgentStatus, AuthenticatedStatus, CodexApproval, CodexEvent, SessionDescriptor } from './types/api'
 import { SignalingClient, type ConnectionState } from './webrtc/signaling'
 
 const STORED_PAIR = 'relay:pair-state'
@@ -18,15 +32,99 @@ export default function App() {
   const [deviceName, setDeviceName] = useState('Web PWA')
   const [message, setMessage] = useState<string | null>(null)
   const [offline, setOffline] = useState(false)
-  const [approval, setApproval] = useState<ApprovalFixture | null>(pendingApprovalFixture)
+  const [, setApprovals] = useState<CodexApproval[]>([])
+  const [, setEvents] = useState<CodexEvent[]>([])
+  const [selectedApproval, setSelectedApproval] = useState<CodexApproval | null>(null)
+  const [busy, setBusy] = useState(false)
   const [rtcState, setRtcState] = useState<ConnectionState>('idle')
   const [dataChannelOpen, setDataChannelOpen] = useState(false)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [target, setTarget] = useState<'window' | 'display'>('display')
   const [fullScreen, setFullScreen] = useState(false)
+  const [promptText, setPromptText] = useState('')
   const videoRef = useRef<HTMLVideoElement>(null)
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(() => pairState && ({ deviceId: pairState.deviceId, leaseToken: pairState.leaseToken }), [pairState])
+
+  // Polling leve de aprovações e eventos Codex.
+  useEffect(() => {
+    if (!auth || !selectedId) return
+    const sessionId = selectedId
+    const currentAuth = auth
+    let active = true
+    async function tick() {
+      try {
+        const [nextApprovals, nextEvents] = await Promise.all([
+          fetchApprovals(sessionId, currentAuth),
+          fetchEvents(sessionId, currentAuth),
+        ])
+        if (!active) return
+        setApprovals(nextApprovals)
+        setEvents(nextEvents)
+        setSelectedApproval((current) => {
+          const list = Array.isArray(nextApprovals) ? nextApprovals : []
+          if (current) {
+            const stillPending = list.find((a) => a.id === current.id)
+            return stillPending ?? list[0] ?? null
+          }
+          return list[0] ?? null
+        })
+      } catch (err) {
+        if (active) setMessage(String(err))
+      }
+    }
+    void tick()
+    const id = setInterval(tick, 2000)
+    return () => {
+      active = false
+      clearInterval(id)
+    }
+  }, [auth, selectedId])
+
+
+
+  async function sendTurn() {
+    if (!auth || !selectedId || !promptText.trim() || busy) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      await startTurn(selectedId, promptText.trim(), auth)
+      setPromptText('')
+      void refreshPrivate()
+    } catch (err) {
+      setMessage(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function interruptCurrentTurn() {
+    if (!auth || !selectedId || busy) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      await interruptTurn(selectedId, auth)
+      void refreshPrivate()
+    } catch (err) {
+      setMessage(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitDecision(approval: CodexApproval, decision: 'accept' | 'deny') {
+    if (!auth || !selectedId) return
+    setMessage(null)
+    try {
+      await decideApproval(selectedId, approval.id, decision, auth)
+      setSelectedApproval(null)
+      const next = await fetchApprovals(selectedId, auth)
+      setApprovals(next)
+      setSelectedApproval(next[0] ?? null)
+    } catch (err) {
+      setMessage(String(err))
+    }
+  }
 
   useEffect(() => {
     void refreshPublic()
@@ -257,10 +355,16 @@ export default function App() {
           onSendClipboard={(text) => signalingRef.current?.sendClipboard(text).catch((err) => setMessage(String(err)))}
           onCopyCwd={() => void navigator.clipboard?.writeText(detail.cwd)}
           onReleaseControl={releaseCurrentLease}
-          onShowApproval={() => setApproval(pendingApprovalFixture)}
+          onSendTurn={sendTurn}
+          onInterruptTurn={interruptCurrentTurn}
+          busy={busy}
+          promptText={promptText}
+          onPromptChange={setPromptText}
         />
       )}
-      {approval && <ApprovalModal approval={approval} onClose={() => setApproval(null)} />}
+      {selectedApproval && detail?.codexThreadId && (
+        <ApprovalModal approval={selectedApproval} onDecide={submitDecision} onClose={() => setSelectedApproval(null)} />
+      )}
       {message && <p className="notice">{message}</p>}
     </Shell>
   )
@@ -279,7 +383,11 @@ function SessionDetail({
   onSendClipboard,
   onCopyCwd,
   onReleaseControl,
-  onShowApproval,
+  onSendTurn,
+  onInterruptTurn,
+  busy,
+  promptText,
+  onPromptChange,
 }: {
   session: SessionDescriptor
   rtcState: ConnectionState
@@ -293,7 +401,11 @@ function SessionDetail({
   onSendClipboard: (text: string) => void
   onCopyCwd: () => void
   onReleaseControl: () => void
-  onShowApproval: () => void
+  onSendTurn: () => void
+  onInterruptTurn: () => void
+  busy: boolean
+  promptText: string
+  onPromptChange: (text: string) => void
 }) {
   const [tab, setTab] = useState<'sessao' | 'janela'>('sessao')
   const [clipboardText, setClipboardText] = useState('')
@@ -330,15 +442,17 @@ function SessionDetail({
             <div><dt>Codex</dt><dd>{session.codexThreadId ?? 'n/d'}</dd></div>
           </dl>
           <div className="controls">
-            <button disabled title="Envio remoto ainda não é executado neste marco.">Enviar</button>
-            <button disabled title="Interrupção remota ainda não é suportada neste marco.">Interromper</button>
+            <button disabled={busy || !promptText.trim()} onClick={onSendTurn}>
+              {busy ? 'Enviando...' : 'Enviar'}
+            </button>
+            <button disabled={busy} onClick={onInterruptTurn}>Interromper</button>
             <button disabled={!dataChannelOpen} onClick={() => onSendClipboard(clipboardText || 'clipboard-test')} title={dataChannelOpen ? 'Colar no Mac' : 'Canal seguro não aberto'}>Colar</button>
             <button onClick={onCopyCwd}>Arquivos</button>
             <button onClick={onReleaseControl}>Liberar controle</button>
           </div>
+          <textarea value={promptText} onChange={(e) => onPromptChange(e.target.value)} placeholder="Prompt para o Codex" rows={3} />
           <input value={clipboardText} onChange={(e) => setClipboardText(e.target.value)} placeholder="Texto para colar no Mac" />
-          <button className="secondary" onClick={onShowApproval}>Abrir aprovação pendente</button>
-          <p className="muted">Enviar e Interromper ainda não executam. Colar funciona quando o canal seguro estiver aberto.</p>
+          <p className="muted">Enviar inicia um turno Codex. Interromper cancela o turno atual. Colar funciona quando o canal seguro estiver aberto.</p>
         </div>
       ) : (
         <div className="control-panel">
@@ -359,20 +473,20 @@ function SessionDetail({
   )
 }
 
-function ApprovalModal({ approval, onClose }: { approval: ApprovalFixture; onClose: () => void }) {
+function ApprovalModal({ approval, onDecide, onClose }: { approval: CodexApproval; onDecide: (a: CodexApproval, decision: 'accept' | 'deny') => void; onClose: () => void }) {
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
         <h2 id="approval-title">Aprovação pendente</h2>
         <dl>
-          <div><dt>Comando</dt><dd>{approval.command}</dd></div>
-          <div><dt>CWD</dt><dd>{approval.cwd}</dd></div>
-          <div><dt>Justificativa</dt><dd>{approval.justification}</dd></div>
-          <div><dt>Permissões</dt><dd>{approval.permissions.join(', ')}</dd></div>
+          <div><dt>Comando</dt><dd>{approval.command || 'n/d'}</dd></div>
+          <div><dt>CWD</dt><dd>{approval.cwd || 'n/d'}</dd></div>
+          <div><dt>Motivo</dt><dd>{approval.reason || 'n/d'}</dd></div>
         </dl>
         <div className="modal-actions">
-          <button onClick={onClose}>Aprovar uma vez</button>
-          <button className="secondary" onClick={onClose}>Negar</button>
+          <button onClick={() => onDecide(approval, 'accept')}>Permitir</button>
+          <button className="secondary" onClick={() => onDecide(approval, 'deny')}>Negar</button>
+          <button className="secondary" onClick={onClose}>Fechar</button>
         </div>
       </section>
     </div>
