@@ -24,7 +24,7 @@ const STORED_PAIR = 'relay:pair-state'
 export default function App() {
   const [health, setHealth] = useState<AgentStatus | null>(null)
   const [pairState, setPairState] = useState<PairState | null>(() => readPairState())
-  const [status, setStatus] = useState<AuthenticatedStatus | null>(null)
+  const [, setStatus] = useState<AuthenticatedStatus | null>(null)
   const [sessions, setSessions] = useState<SessionDescriptor[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<SessionDescriptor | null>(null)
@@ -325,8 +325,8 @@ export default function App() {
     <Shell>
       <header className="topbar">
         <div>
-          <p className="eyebrow">Sessões</p>
-          <h1>{pairState.hostName || 'Relay'}</h1>
+          <p className="eyebrow">Remote CliControl</p>
+          <h1>Seu Mac</h1>
         </div>
         <button className="icon-button" onClick={() => void refreshPrivate()} aria-label="Atualizar">↻</button>
       </header>
@@ -334,26 +334,27 @@ export default function App() {
       <section className="panel compact">
         <div className="lease-row">
           <div>
-            <strong>{status?.version ?? health?.version ?? 'relay'}</strong>
-            <span>Lease até {formatTime(pairState.leaseExpiry)}</span>
+            <strong>Conectado</strong>
+            <span>Até {formatTime(pairState.leaseExpiry)}</span>
           </div>
-          <button className="secondary" onClick={releaseCurrentLease}>Liberar</button>
+          <button className="secondary" onClick={releaseCurrentLease}>Desconectar</button>
         </div>
       </section>
 
-      <section className="session-list" aria-label="Sessões">
-        {sessions.map((session) => (
-          <button
-            key={session.id}
-            className={`session-row ${selectedId === session.id ? 'selected' : ''}`}
-            onClick={() => setSelectedId(session.id)}
-          >
-            <span>{session.harness}</span>
-            <strong>{session.nativeSessionId}</strong>
-            <small>{session.status}</small>
-          </button>
-        ))}
-      </section>
+      {sessions.length > 1 && (
+        <section className="session-list" aria-label="Sessões">
+          {sessions.map((session) => (
+            <button
+              key={session.id}
+              className={`session-row ${selectedId === session.id ? 'selected' : ''}`}
+              onClick={() => setSelectedId(session.id)}
+            >
+              <strong>{session.nativeSessionId || 'Mac'}</strong>
+              <small>{session.codexThreadId ? 'com chat' : 'tela'}</small>
+            </button>
+          ))}
+        </section>
+      )}
 
       {detail && (
         <SessionDetail
@@ -421,9 +422,13 @@ function SessionDetail({
   promptText: string
   onPromptChange: (text: string) => void
 }) {
-  const [tab, setTab] = useState<'sessao' | 'janela'>('sessao')
+  // Janela primeiro: funciona com qualquer CLI (Codex, Grok, terminal…).
+  const [tab, setTab] = useState<'janela' | 'chat'>('janela')
   const [clipboardText, setClipboardText] = useState('')
+  const [showDetails, setShowDetails] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const hasCodex = Boolean(session.codexThreadId)
+  const linkLabel = rtcStateLabel(rtcState, dataChannelOpen)
 
   useEffect(() => {
     const video = videoRef.current
@@ -437,54 +442,110 @@ function SessionDetail({
     <section className="panel detail">
       <div className="detail-head">
         <div>
-          <p className="eyebrow">Sessão / Janela</p>
-          <h2>{session.nativeSessionId}</h2>
+          <p className="eyebrow">Controle remoto</p>
+          <h2>{hasCodex ? 'Codex + tela' : 'Tela do Mac'}</h2>
         </div>
-        <span className={`status-pill ${session.status}`}>{rtcState}</span>
+        <span className={`status-pill ${rtcState}`}>{linkLabel}</span>
       </div>
-      <div className="tabs" role="tablist" aria-label="Detalhe">
-        <button className={tab === 'sessao' ? 'active' : ''} onClick={() => setTab('sessao')} role="tab" aria-selected={tab === 'sessao'}>Sessão</button>
-        <button className={tab === 'janela' ? 'active' : ''} onClick={() => setTab('janela')} role="tab" aria-selected={tab === 'janela'}>Janela</button>
+      <div className="tabs" role="tablist" aria-label="Modo">
+        <button className={tab === 'janela' ? 'active' : ''} onClick={() => setTab('janela')} role="tab" aria-selected={tab === 'janela'}>
+          Tela
+        </button>
+        {hasCodex && (
+          <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')} role="tab" aria-selected={tab === 'chat'}>
+            Chat
+          </button>
+        )}
       </div>
-      {tab === 'sessao' ? (
+
+      {tab === 'janela' ? (
         <div className="control-panel">
-          <dl>
-            <div><dt>CWD</dt><dd>{session.cwd}</dd></div>
-            <div><dt>PID</dt><dd>{session.pid ?? 'n/d'}</dd></div>
-            <div><dt>Janela</dt><dd>{session.windowId ?? (session.frontmost ? 'frontmost' : 'n/d')}</dd></div>
-            <div><dt>Maestri</dt><dd>{session.maestriTerminalId ?? 'n/d'}</dd></div>
-            <div><dt>Codex</dt><dd>{session.codexThreadId ?? 'n/d'}</dd></div>
-          </dl>
-          <div className="controls">
-            <button disabled={busy || !promptText.trim()} onClick={onSendTurn}>
-              {busy ? 'Enviando...' : 'Enviar'}
-            </button>
-            <button disabled={busy} onClick={onInterruptTurn}>Interromper</button>
-            <button disabled={!dataChannelOpen} onClick={() => onSendClipboard(clipboardText || 'clipboard-test')} title={dataChannelOpen ? 'Colar no Mac' : 'Canal seguro não aberto'}>Colar</button>
-            <button onClick={onCopyCwd}>Arquivos</button>
-            <button onClick={onReleaseControl}>Liberar controle</button>
+          <div className={`video-wrapper ${fullScreen ? 'fullscreen' : ''}`}>
+            <video ref={videoRef} muted playsInline autoPlay className="relay-video" />
+            {!remoteStream && (
+              <p className="video-placeholder muted">
+                {dataChannelOpen
+                  ? 'Canal aberto. Vídeo da tela ainda em construção — teclado/colar já podem funcionar.'
+                  : 'Conectando ao Mac…'}
+              </p>
+            )}
           </div>
-          <textarea value={promptText} onChange={(e) => onPromptChange(e.target.value)} placeholder="Prompt para o Codex" rows={3} />
-          <input value={clipboardText} onChange={(e) => setClipboardText(e.target.value)} placeholder="Texto para colar no Mac" />
-          <p className="muted">Enviar inicia um turno Codex. Interromper cancela o turno atual. Colar funciona quando o canal seguro estiver aberto.</p>
+          <div className="controls">
+            <button className={target === 'display' ? 'active' : ''} onClick={() => onTargetChange('display')}>
+              Tela cheia
+            </button>
+            <button className={target === 'window' ? 'active' : ''} onClick={() => onTargetChange('window')}>
+              Janela
+            </button>
+            <button onClick={onToggleFullScreen}>{fullScreen ? 'Sair' : 'Expandir'}</button>
+          </div>
+          <div className="controls">
+            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'keyDown', key: 'space' })}>
+              Teclado
+            </button>
+            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'mouseMove', x: 0.5, y: 0.5 })}>
+              Mouse
+            </button>
+            <button
+              disabled={!dataChannelOpen}
+              onClick={() => onSendClipboard(clipboardText || ' ')}
+              title={dataChannelOpen ? 'Colar no Mac' : 'Aguardando conexão'}
+            >
+              Colar
+            </button>
+            <button onClick={onReleaseControl}>Sair</button>
+          </div>
+          <input
+            value={clipboardText}
+            onChange={(e) => setClipboardText(e.target.value)}
+            placeholder="Texto para colar no Mac"
+          />
+          <p className="muted">
+            Serve pra qualquer CLI aberta no Mac. Vídeo completo e helper de captura ainda evoluem; o caminho principal é ver e digitar na tela.
+          </p>
+          <button type="button" className="secondary" onClick={() => setShowDetails((v) => !v)}>
+            {showDetails ? 'Ocultar detalhes' : 'Detalhes técnicos'}
+          </button>
+          {showDetails && (
+            <dl className="tech-details">
+              <div><dt>Pasta</dt><dd>{session.cwd}</dd></div>
+              <div><dt>Processo</dt><dd>{session.pid ?? '—'}</dd></div>
+              <div><dt>Tipo</dt><dd>{session.harness}</dd></div>
+              {session.codexThreadId && <div><dt>Codex</dt><dd>{session.codexThreadId}</dd></div>}
+            </dl>
+          )}
         </div>
       ) : (
         <div className="control-panel">
+          <p className="muted">Mensagens vão para a thread Codex desta sessão.</p>
+          <textarea
+            value={promptText}
+            onChange={(e) => onPromptChange(e.target.value)}
+            placeholder="Escreva o prompt…"
+            rows={3}
+          />
           <div className="controls">
-            <button className={target === 'window' ? 'active' : ''} onClick={() => onTargetChange('window')}>Janela</button>
-            <button className={target === 'display' ? 'active' : ''} onClick={() => onTargetChange('display')}>Tela</button>
-            <button onClick={onToggleFullScreen}>{fullScreen ? 'Sair' : 'Tela inteira'}</button>
-            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'keyDown', key: 'space' })}>Teclado</button>
-            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'mouseMove', x: 0.5, y: 0.5 })}>Mouse</button>
+            <button disabled={busy || !promptText.trim()} onClick={onSendTurn}>
+              {busy ? 'Enviando…' : 'Enviar'}
+            </button>
+            <button disabled={busy} onClick={onInterruptTurn}>
+              Parar
+            </button>
+            <button onClick={onCopyCwd}>Copiar pasta</button>
+            <button onClick={onReleaseControl}>Sair</button>
           </div>
-          <div className={`video-wrapper ${fullScreen ? 'fullscreen' : ''}`}>
-            <video ref={videoRef} muted playsInline autoPlay className="relay-video" />
-          </div>
-          <p className="muted">Vídeo real via WebRTC. Controles de teclado/mouse só funcionam com canal seguro aberto.</p>
         </div>
       )}
     </section>
   )
+}
+
+function rtcStateLabel(state: ConnectionState, dataOpen: boolean): string {
+  if (dataOpen || state === 'connected') return 'Pronto'
+  if (state === 'connecting' || state === 'reconnecting') return 'Conectando…'
+  if (state === 'failed') return 'Falhou'
+  if (state === 'disconnected') return 'Desconectado'
+  return 'Aguardando'
 }
 
 function ApprovalModal({ approval, onDecide, onClose }: { approval: CodexApproval; onDecide: (a: CodexApproval, decision: 'accept' | 'deny') => void; onClose: () => void }) {

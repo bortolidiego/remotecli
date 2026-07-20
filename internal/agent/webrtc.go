@@ -90,12 +90,13 @@ func (pm *PeerManager) CreatePeerForLease(deviceID, lease string, sharedKey []by
 	if len(sharedKey) != 32 {
 		return nil, errors.New("shared_key inválida")
 	}
+	// Cliente PWA cria a offer + DataChannels; o host responde (não é initiator).
 	cfg := webrtc.Config{
 		DeviceID:    deviceID,
 		SessionID:   pm.agent.sessionID,
 		SharedKey:   sharedKey,
 		ICEProvider: webrtc.DefaultICEProvider{},
-		Initiator:   true,
+		Initiator:   false,
 		PeerID:      "host",
 	}
 	mgr, err := webrtc.NewPeerManager(cfg)

@@ -74,8 +74,12 @@ export class SignalingClient {
       await this.close()
     }
     this.setState('connecting')
+    // STUN públicos — ajuda celular↔Mac na mesma Wi‑Fi (e redes com NAT).
     this.pc = new RTCPeerConnection({
-      iceServers: [],
+      iceServers: [
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        { urls: 'stun:stun.l.google.com:19302' },
+      ],
       iceTransportPolicy: 'all',
     })
 

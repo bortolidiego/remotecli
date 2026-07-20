@@ -75,3 +75,10 @@ Rodado no Mac com agente local `127.0.0.1:24109` + Codex App Server real (`ipc.s
 | Tunnel Cloudflare | não exercitado (sem token) |
 
 Agente de smoke pode ser parado com `./relay stop` na sessão correspondente.
+
+## UX Janela-first (2026-07-20)
+
+- Produto = qualquer CLI via **Tela** (não só Codex).
+- UI: aba Tela padrão; Chat só se houver `codexThreadId`.
+- Sem erro técnico de Codex na sessão default.
+- WebRTC: host answerer + STUN no browser; vídeo de captura ainda incompleto (helper).

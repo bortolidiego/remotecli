@@ -368,6 +368,22 @@ dd {
   background: #0f172a;
 }
 
+.video-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+  color: #cbd5e1;
+  margin: 0;
+}
+
+.tech-details {
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+
 @media (min-width: 700px) {
   .app-shell {
     width: min(100%, 760px);

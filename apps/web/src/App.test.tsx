@@ -105,23 +105,20 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('native-1')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Enviar' })).toBeDisabled() // sem texto no prompt
-    expect(screen.getByRole('button', { name: 'Interromper' })).toBeEnabled()
+    // Janela/Tela primeiro — qualquer CLI; chat só se houver Codex.
+    expect(await screen.findByText('Codex + tela')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Tela' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Colar' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Arquivos' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Liberar controle' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Janela' }))
-    expect(screen.getByRole('button', { name: 'Janela' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Tela' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Tela inteira' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Teclado' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Mouse' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Sair' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }))
+    expect(screen.getByRole('button', { name: 'Enviar' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Parar' })).toBeEnabled()
 
     expect(screen.getByRole('dialog', { name: 'Aprovação pendente' })).toBeInTheDocument()
     expect(screen.getByText('cat package.json')).toBeInTheDocument()
-    expect(screen.getAllByText('/Users/diegobortoli/Desktop/apps/relay').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByRole('button', { name: 'Permitir' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Negar' })).toBeInTheDocument()
     vi.useRealTimers()
