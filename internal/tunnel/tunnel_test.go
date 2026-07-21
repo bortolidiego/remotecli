@@ -104,22 +104,22 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	assert.False(t, cfg.Enabled)
 	assert.Equal(t, DefaultName, cfg.Name)
-	assert.Equal(t, DefaultHostname, cfg.Hostname)
+	assert.Equal(t, "", cfg.Hostname)
 	assert.Equal(t, DefaultURL, cfg.URL)
 }
 
 func TestNewManagerInjectsDefaults(t *testing.T) {
 	m := NewManager(Config{}, nil)
 	assert.Equal(t, DefaultName, m.Config().Name)
-	assert.Equal(t, DefaultHostname, m.Config().Hostname)
+	assert.Equal(t, "", m.Config().Hostname)
 	assert.Equal(t, DefaultURL, m.Config().URL)
 }
 
 func TestStartRequiresToken(t *testing.T) {
 	t.Setenv(tokenEnv, "")
-	m := NewManager(Config{Enabled: true, Token: ""}, &fakeRunner{})
+	m := NewManager(Config{Mode: ModeTunnel, Token: ""}, &fakeRunner{})
 	err := m.Start(context.Background())
-	assert.ErrorIs(t, err, ErrTokenMissing)
+	assert.ErrorIs(t, err, ErrTunnelDisabled)
 }
 
 func TestStartRequiresCloudflared(t *testing.T) {
@@ -133,6 +133,30 @@ func TestStartDisabled(t *testing.T) {
 	m := NewManager(Config{Token: "tok"}, &fakeRunner{})
 	err := m.Start(context.Background())
 	assert.ErrorIs(t, err, ErrTunnelDisabled)
+}
+
+func TestAccessModeLANByDefault(t *testing.T) {
+	cfg := Config{}
+	assert.Equal(t, ModeLAN, cfg.AccessMode())
+	assert.False(t, cfg.Enabled)
+}
+
+func TestAccessModeTunnelWhenEnabledWithToken(t *testing.T) {
+	cfg := Config{Enabled: true, Token: "tok"}
+	assert.Equal(t, ModeTunnel, cfg.AccessMode())
+	assert.True(t, cfg.Enabled)
+}
+
+func TestAccessModeHostedFromURL(t *testing.T) {
+	cfg := Config{HostedURL: "https://relay.example.com"}
+	assert.Equal(t, ModeHosted, cfg.AccessMode())
+	assert.False(t, cfg.Enabled)
+}
+
+func TestAccessModeTokenOnlyDoesNotForceTunnel(t *testing.T) {
+	cfg := Config{Token: "tok"}
+	assert.Equal(t, ModeLAN, cfg.AccessMode())
+	assert.False(t, cfg.Enabled)
 }
 
 func TestStartSuccess(t *testing.T) {

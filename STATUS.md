@@ -10,6 +10,8 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
 - **Pasta atual:** `/Users/diegobortoli/Desktop/apps/relay`  
 - **Hostname planejado:** `relay.kbtech.com.br` (pode ser revisado no rebrand)
 
+> **Defaults de produto atualizados (2026-07-20):** os defaults antigos do Marco 4.1 — nome `relay-diego` e hostname `relay.kbtech.com.br` — não são mais hardcoded no binário. O `internal/tunnel` agora usa `remotecli` como nome padrão e nenhum hostname forçado; cada usuário define o próprio tunnel/token no Cloudflare. O `relay.kbtech.com.br` permanece apenas como planejamento futuro de serviço hosted.
+
 ## O que já está pronto
 
 - **Marco 1 — base e segurança:** monorepo, agente Go local (`127.0.0.1:24109`), crypto (ECDSA/ECDH/HKDF/AES-GCM), pareamento QR, keychain, CLI, PWA embutida.

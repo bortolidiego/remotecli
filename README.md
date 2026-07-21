@@ -77,6 +77,42 @@ remotecli --help
 
 ---
 
+## Modos de acesso (LAN / tunnel / hosted)
+
+O `remotecli` pode ser alcançado de 3 formas. O padrão é **LAN**: nenhuma conta nem configuração extra.
+
+| Modo | Quando usar | Requisito |
+|---|---|---|
+| **LAN** (padrão) | iPhone na mesma Wi‑Fi do Mac | nenhum |
+| **tunnel** | Fora da Wi‑Fi, via Cloudflare Tunnel do próprio usuário | conta Cloudflare + token + `cloudflared` no PATH |
+| **hosted** | Serviço central relay (roadmap) | URL do serviço — ainda não disponível |
+
+### Comandos
+
+```bash
+# Ver modo atual
+remotecli access
+
+# Só Wi‑Fi local (zero config) — padrão seguro
+remotecli access lan
+
+# Cloudflare Tunnel do usuário
+remotecli access tunnel --token SEU_TOKEN [--hostname seu.dominio]
+
+# Serviço central (roadmap; salva preferência, mas ainda não conecta)
+remotecli access hosted --hosted-url https://relay.seudominio.com
+```
+
+Depois de configurar tunnel, `remotecli relay` sobe o agente **e** o tunnel. O token pode vir da env `REMOTECLI_TUNNEL_TOKEN` (útil para scripts), mas `--token` é mais explícito.
+
+### Segurança do tunnel
+
+- O token do Cloudflare é **seu**, do seu dashboard. Nada é roteado por servidores nossos.
+- O token fica salvo no Keychain do Mac (conta de acesso da máquina).
+- Instale o connector: `brew install cloudflared`.
+
+---
+
 ## Estrutura do repo
 
 ```text

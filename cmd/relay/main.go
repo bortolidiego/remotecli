@@ -37,6 +37,9 @@ type CLI struct {
 	PhoneBridge PhoneBridgeCmd `cmd:"" name:"phone-bridge" help:"Loop do terminal ponte Maestri (rcli-phone) — entrega mensagens do celular na conversa."`
 	EnsureBridge EnsureBridgeCmd `cmd:"" name:"ensure-bridge" help:"Garante o terminal rcli-phone no canvas Maestri (maestro)."`
 
+	// Acesso (LAN / tunnel do usuário / hosted)
+	Access AccessCmd `cmd:"" help:"Modo de acesso: lan (padrão), tunnel (Cloudflare do usuário) ou hosted (roadmap)."`
+
 	// Operação / legado
 	Serve   ServeCmd   `cmd:"" help:"Sobe o agente em foreground (daemon)."`
 	Setup   SetupCmd   `cmd:"" help:"Configura sessão/tunnel e sobe o agente."`
@@ -46,6 +49,131 @@ type CLI struct {
 	Stop    StopCmd    `cmd:"" help:"Para o agente local."`
 	Devices DevicesCmd `cmd:"" help:"Lista dispositivos emparelhados."`
 	Revoke  RevokeCmd  `cmd:"" help:"Revoga um dispositivo."`
+}
+
+// AccessCmd — configura como o celular alcança o agente.
+//
+//	remotecli access              # mostra modo atual
+//	remotecli access lan          # só Wi‑Fi (zero config)
+//	remotecli access tunnel --token TOKEN [--hostname meudominio.com]
+//	remotecli access hosted --url https://…  # roadmap
+type AccessCmd struct {
+	Mode     string `arg:"" optional:"" help:"lan | tunnel | hosted (vazio = mostrar atual)."`
+	Token    string `name:"token" env:"REMOTECLI_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel (modo tunnel)."`
+	Hostname string `name:"hostname" env:"REMOTECLI_TUNNEL_HOSTNAME" help:"Hostname público opcional (só documentação/exibição)."`
+	URL      string `name:"url" env:"REMOTECLI_TUNNEL_URL" help:"URL local exposta pelo tunnel (default http://127.0.0.1:24109)."`
+	Hosted   string `name:"hosted-url" env:"REMOTECLI_HOSTED_URL" help:"URL do serviço hosted (modo hosted)."`
+	Name     string `name:"name" env:"REMOTECLI_TUNNEL_NAME" help:"Nome amigável do tunnel (default remotecli)."`
+}
+
+func (c *AccessCmd) Run(ctx *kong.Context) error {
+	store := keychain.DefaultStore()
+	mode := strings.ToLower(strings.TrimSpace(c.Mode))
+	if mode == "" {
+		return printAccessStatus(store)
+	}
+	switch mode {
+	case tunnel.ModeLAN, "local", "wifi":
+		cfg := tunnel.DefaultConfig()
+		cfg.Mode = tunnel.ModeLAN
+		cfg.Enabled = false
+		if err := saveAccessConfig(store, cfg); err != nil {
+			return err
+		}
+		fmt.Println("Modo de acesso: LAN (só Wi‑Fi local).")
+		fmt.Println("Celular na mesma rede → remotecli relay → escaneie o QR.")
+		fmt.Println("Nenhuma conta Cloudflare necessária.")
+		return nil
+	case tunnel.ModeTunnel, "cloudflare", "cf":
+		token := strings.TrimSpace(c.Token)
+		if token == "" {
+			token = strings.TrimSpace(os.Getenv("RELAY_TUNNEL_TOKEN"))
+		}
+		if token == "" {
+			return fmt.Errorf("modo tunnel exige --token (ou env REMOTECLI_TUNNEL_TOKEN).\n\nComo obter:\n  1) Conta em https://dash.cloudflare.com\n  2) Zero Trust → Networks → Tunnels → Create\n  3) Copie o token do conector\n  4) remotecli access tunnel --token SEU_TOKEN\n  5) brew install cloudflared  (se ainda não tiver)")
+		}
+		cfg := tunnel.DefaultConfig()
+		cfg.Mode = tunnel.ModeTunnel
+		cfg.Enabled = true
+		cfg.Token = token
+		if c.Hostname != "" {
+			cfg.Hostname = c.Hostname
+		}
+		if c.URL != "" {
+			cfg.URL = c.URL
+		}
+		if c.Name != "" {
+			cfg.Name = c.Name
+		}
+		cfg.Normalize()
+		if err := saveAccessConfig(store, cfg); err != nil {
+			return err
+		}
+		fmt.Println("Modo de acesso: TUNNEL (Cloudflare do usuário).")
+		if cfg.Hostname != "" {
+			fmt.Printf("Hostname (referência): %s\n", cfg.Hostname)
+		}
+		fmt.Printf("URL local exposta: %s\n", cfg.URL)
+		fmt.Println("Token salvo no Keychain. Rode: remotecli relay")
+		fmt.Println("Requisito: cloudflared no PATH (brew install cloudflared).")
+		return nil
+	case tunnel.ModeHosted, "cloud", "saas":
+		url := strings.TrimSpace(c.Hosted)
+		if url == "" {
+			return fmt.Errorf("modo hosted exige --hosted-url (ex: https://relay.seudominio.com).\nAinda em roadmap: por enquanto use 'lan' ou 'tunnel'.")
+		}
+		cfg := tunnel.DefaultConfig()
+		cfg.Mode = tunnel.ModeHosted
+		cfg.HostedURL = url
+		cfg.Enabled = false
+		cfg.Normalize()
+		if err := saveAccessConfig(store, cfg); err != nil {
+			return err
+		}
+		fmt.Println("Modo de acesso: HOSTED (salvo — implementação em roadmap).")
+		fmt.Printf("URL: %s\n", url)
+		fmt.Println("Por enquanto o agente ainda sobe em LAN; o relay central virá depois.")
+		return nil
+	default:
+		return fmt.Errorf("modo desconhecido %q — use: lan | tunnel | hosted", c.Mode)
+	}
+}
+
+func printAccessStatus(store keychain.Store) error {
+	cfg, err := loadAccessConfig(store)
+	if err != nil {
+		cfg = tunnel.DefaultConfig()
+	}
+	cfg.Normalize()
+	fmt.Println("Remote CliControl — modo de acesso")
+	fmt.Println()
+	switch cfg.AccessMode() {
+	case tunnel.ModeTunnel:
+		fmt.Println("  Atual: TUNNEL (Cloudflare do usuário)")
+		if cfg.Hostname != "" {
+			fmt.Printf("  Hostname: %s\n", cfg.Hostname)
+		} else {
+			fmt.Println("  Hostname: (não definido — opcional)")
+		}
+		fmt.Printf("  URL local: %s\n", cfg.URL)
+		if cfg.Token != "" {
+			fmt.Println("  Token: configurado (Keychain/env)")
+		} else {
+			fmt.Println("  Token: AUSENTE — configure com remotecli access tunnel --token …")
+		}
+	case tunnel.ModeHosted:
+		fmt.Println("  Atual: HOSTED (roadmap)")
+		fmt.Printf("  URL: %s\n", cfg.HostedURL)
+	default:
+		fmt.Println("  Atual: LAN (só Wi‑Fi local) ← padrão")
+		fmt.Println("  Zero config de cloud. Celular na mesma rede.")
+	}
+	fmt.Println()
+	fmt.Println("Trocar:")
+	fmt.Println("  remotecli access lan")
+	fmt.Println("  remotecli access tunnel --token TOKEN [--hostname seu.dominio]")
+	fmt.Println("  remotecli access hosted --hosted-url https://…")
+	return nil
 }
 
 // PhoneBridgeCmd processa a fila de mensagens do celular → sessão Maestri.
@@ -100,11 +228,11 @@ type ServeFlags struct {
 	WindowID  string `help:"Identificador da janela nativa, quando conhecido."`
 	PID       int    `env:"RELAY_TARGET_PID" help:"PID alvo da sessão; default seguro é o processo pai."`
 
-	TunnelEnabled  bool   `help:"Habilita Cloudflare Tunnel no share."`
-	TunnelName     string `env:"RELAY_TUNNEL_NAME" default:"relay-diego" help:"Nome do tunnel."`
-	TunnelHostname string `env:"RELAY_TUNNEL_HOSTNAME" default:"relay.kbtech.com.br" help:"Hostname público do tunnel."`
-	TunnelToken    string `env:"RELAY_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel (preferir env)."`
-	TunnelURL      string `env:"RELAY_TUNNEL_URL" default:"http://127.0.0.1:24109" help:"URL local para o qual o tunnel aponta."`
+	TunnelEnabled  bool   `help:"Habilita Cloudflare Tunnel (modo tunnel). Preferir: remotecli access tunnel."`
+	TunnelName     string `env:"REMOTECLI_TUNNEL_NAME" help:"Nome do tunnel (default remotecli)."`
+	TunnelHostname string `env:"REMOTECLI_TUNNEL_HOSTNAME" help:"Hostname público opcional (exibição)."`
+	TunnelToken    string `env:"REMOTECLI_TUNNEL_TOKEN" help:"Token do Cloudflare Tunnel."`
+	TunnelURL      string `env:"REMOTECLI_TUNNEL_URL" help:"URL local do agente (default http://127.0.0.1:24109)."`
 }
 
 type ServeCmd struct {
@@ -112,13 +240,8 @@ type ServeCmd struct {
 }
 
 func (s *ServeCmd) Run(ctx *kong.Context) error {
-	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID, tunnel.Config{
-		Enabled:  s.TunnelEnabled,
-		Name:     s.TunnelName,
-		Hostname: s.TunnelHostname,
-		URL:      s.TunnelURL,
-		Token:    s.TunnelToken,
-	}, true)
+	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID,
+		resolveTunnelConfig(s.TunnelEnabled, s.TunnelName, s.TunnelHostname, s.TunnelURL, s.TunnelToken), true)
 }
 
 type SetupCmd struct {
@@ -136,13 +259,10 @@ func runServe(sessionID, hostName, basePath, windowID string, frontmost bool, pi
 	if base == "" {
 		base, _ = os.Getwd()
 	}
-	tunCfg.Normalize()
 	store := keychain.DefaultStore()
-	if tunCfg.Enabled {
-		if err := saveTunnelConfig(store, sessionID, tunCfg); err != nil {
-			return err
-		}
-	}
+	// Preferência salva (remotecli access …) + flags da linha de comando.
+	tunCfg = mergeTunnelWithSaved(store, tunCfg)
+	tunCfg.Normalize()
 	cfg := agent.Config{
 		Addr:      defaultAgentAddr(),
 		SessionID: sessionID,
@@ -163,11 +283,9 @@ func runServe(sessionID, hostName, basePath, windowID string, frontmost bool, pi
 	if block {
 		fmt.Printf("Sessão inicializada: %s\n", sessionID)
 		fmt.Printf("Host: %s (%s)\n", name, ag.Registry().HostID())
-		fmt.Printf("Agente: http://%s\n", ag.ListenAddr())
+		fmt.Printf("Agente: https://%s (ou LAN)\n", ag.ListenAddr())
 		fmt.Printf("Sandbox: %s\n", base)
-		if tunCfg.Enabled {
-			fmt.Printf("Tunnel: habilitado (%s -> %s)\n", tunCfg.Hostname, tunCfg.URL)
-		}
+		printAccessBanner(tunCfg)
 		fmt.Println("Identidade e token local salvos no Keychain. O agente continua rodando.")
 		<-ag.Done()
 	}
@@ -175,13 +293,8 @@ func runServe(sessionID, hostName, basePath, windowID string, frontmost bool, pi
 }
 
 func (s *SetupCmd) Run(ctx *kong.Context) error {
-	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID, tunnel.Config{
-		Enabled:  s.TunnelEnabled,
-		Name:     s.TunnelName,
-		Hostname: s.TunnelHostname,
-		URL:      s.TunnelURL,
-		Token:    s.TunnelToken,
-	}, true)
+	return runServe(s.SessionID, s.HostName, s.BasePath, s.WindowID, s.Frontmost, s.PID,
+		resolveTunnelConfig(s.TunnelEnabled, s.TunnelName, s.TunnelHostname, s.TunnelURL, s.TunnelToken), true)
 }
 
 // SyncFlags flags comuns a remotecli relay / remotecli here / share.
@@ -263,17 +376,28 @@ func runSyncSession(s SyncFlags, mode syncMode) error {
 		return err
 	}
 
+	// Banner de modo de acesso (LAN / tunnel / hosted)
+	if acc, err := loadAccessConfig(store); err == nil {
+		printAccessBanner(acc)
+	} else {
+		printAccessBanner(tunnel.DefaultConfig())
+	}
+
 	if !s.NoTunnel {
 		if err := requestTunnelStart(cAddr, token); err != nil {
 			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
 				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado.\n")
+				fmt.Fprintf(os.Stderr, "  brew install cloudflared\n")
 			} else if errors.Is(err, tunnel.ErrTokenMissing) {
 				fmt.Fprintf(os.Stderr, "Aviso: token do tunnel não configurado.\n")
+				fmt.Fprintf(os.Stderr, "  remotecli access tunnel --token SEU_TOKEN\n")
 			} else if errors.Is(err, tunnel.ErrTunnelDisabled) || isAgentTunnelDisabled(err) {
-				// silencioso
+				// LAN: silencioso
 			} else {
 				return err
 			}
+		} else if acc, err := loadAccessConfig(store); err == nil && acc.AccessMode() == tunnel.ModeTunnel {
+			fmt.Println("Tunnel Cloudflare: pedido de start enviado ao agente.")
 		}
 	}
 	meta := buildSessionMetadata(s.SessionID, s.WindowID, s.Frontmost, s.PID)
@@ -677,31 +801,128 @@ func resolveLocalToken(override, sessionID string, store keychain.Store) (string
 	return token, nil
 }
 
-const tunnelKey = "relay-tunnel-config"
+const (
+	tunnelKey         = "relay-tunnel-config"
+	accessAccountHost = "host" // config de acesso é por máquina, não por sessão CLI
+)
 
-var errTunnelConfigMissing = errors.New("configuração de tunnel não encontrada")
+var errTunnelConfigMissing = errors.New("configuração de acesso não encontrada")
 
-func tunnelAccount(sessionID string) string { return "host-" + sessionID }
+func tunnelAccount(sessionID string) string { return "host-" + sessionID } // legado
 
-func saveTunnelConfig(store keychain.Store, sessionID string, cfg tunnel.Config) error {
+func saveAccessConfig(store keychain.Store, cfg tunnel.Config) error {
+	cfg.Normalize()
+	// Não persistir token em plain se vier só de env? Persistimos para o agente subir sozinho.
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	return store.SaveSecret(tunnelKey, tunnelAccount(sessionID), b)
+	return store.SaveSecret(tunnelKey, accessAccountHost, b)
+}
+
+func loadAccessConfig(store keychain.Store) (tunnel.Config, error) {
+	// Conta canônica + legado por session
+	for _, account := range []string{accessAccountHost, "host-default"} {
+		b, err := store.LoadSecret(tunnelKey, account)
+		if err != nil {
+			continue
+		}
+		var cfg tunnel.Config
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			continue
+		}
+		cfg.Normalize()
+		return cfg, nil
+	}
+	return tunnel.Config{}, errTunnelConfigMissing
+}
+
+// saveTunnelConfig mantém API antiga (sessionID ignorado — config por host).
+func saveTunnelConfig(store keychain.Store, sessionID string, cfg tunnel.Config) error {
+	_ = sessionID
+	return saveAccessConfig(store, cfg)
 }
 
 func loadTunnelConfig(store keychain.Store, sessionID string) (tunnel.Config, error) {
-	b, err := store.LoadSecret(tunnelKey, tunnelAccount(sessionID))
-	if err != nil {
-		return tunnel.Config{}, errTunnelConfigMissing
+	_ = sessionID
+	return loadAccessConfig(store)
+}
+
+func resolveTunnelConfig(enabled bool, name, hostname, urlStr, token string) tunnel.Config {
+	cfg := tunnel.DefaultConfig()
+	if enabled || token != "" {
+		cfg.Mode = tunnel.ModeTunnel
+		cfg.Enabled = true
 	}
-	var cfg tunnel.Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return tunnel.Config{}, err
+	if name != "" {
+		cfg.Name = name
+	}
+	if hostname != "" {
+		cfg.Hostname = hostname
+	}
+	if urlStr != "" {
+		cfg.URL = urlStr
+	}
+	if token != "" {
+		cfg.Token = token
 	}
 	cfg.Normalize()
-	return cfg, nil
+	return cfg
+}
+
+func mergeTunnelWithSaved(store keychain.Store, flags tunnel.Config) tunnel.Config {
+	saved, err := loadAccessConfig(store)
+	if err != nil {
+		flags.Normalize()
+		return flags
+	}
+	// Salvo como base; flags explícitas sobrescrevem.
+	out := saved
+	if flags.Token != "" {
+		out.Token = flags.Token
+		out.Mode = tunnel.ModeTunnel
+		out.Enabled = true
+	}
+	if flags.Hostname != "" {
+		out.Hostname = flags.Hostname
+	}
+	if flags.URL != "" && flags.URL != tunnel.DefaultURL {
+		out.URL = flags.URL
+	} else if flags.URL != "" && out.URL == "" {
+		out.URL = flags.URL
+	}
+	if flags.Name != "" && flags.Name != tunnel.DefaultName {
+		out.Name = flags.Name
+	}
+	if flags.Enabled {
+		out.Enabled = true
+		out.Mode = tunnel.ModeTunnel
+	}
+	if flags.HostedURL != "" {
+		out.HostedURL = flags.HostedURL
+		out.Mode = tunnel.ModeHosted
+	}
+	if flags.Mode != "" {
+		out.Mode = flags.Mode
+	}
+	out.Normalize()
+	return out
+}
+
+func printAccessBanner(cfg tunnel.Config) {
+	cfg.Normalize()
+	switch cfg.AccessMode() {
+	case tunnel.ModeTunnel:
+		host := cfg.Hostname
+		if host == "" {
+			host = "(hostname no painel Cloudflare)"
+		}
+		fmt.Printf("Acesso: TUNNEL → %s (token do usuário)\n", host)
+	case tunnel.ModeHosted:
+		fmt.Printf("Acesso: HOSTED → %s (roadmap)\n", cfg.HostedURL)
+	default:
+		fmt.Println("Acesso: LAN (mesma Wi‑Fi). Remoto: remotecli access tunnel --token …")
+	}
 }
 
 func requestTunnelStart(addr, token string) error {

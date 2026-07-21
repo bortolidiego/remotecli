@@ -12,11 +12,18 @@ import (
 )
 
 const (
-	DefaultName     = "relay-diego"
-	DefaultHostname = "relay.kbtech.com.br"
-	DefaultURL      = "http://127.0.0.1:24109"
+	// Defaults genéricos (self-host). Sem hostname de um único dono.
+	DefaultName = "remotecli"
+	DefaultURL  = "http://127.0.0.1:24109"
 
-	tokenEnv = "RELAY_TUNNEL_TOKEN"
+	// Modos de acesso (produto).
+	ModeLAN    = "lan"    // só Wi‑Fi local (padrão)
+	ModeTunnel = "tunnel" // Cloudflare Tunnel do usuário
+	ModeHosted = "hosted" // serviço remoto (roadmap)
+
+	tokenEnv         = "RELAY_TUNNEL_TOKEN"
+	tokenEnvAlias    = "REMOTECLI_TUNNEL_TOKEN"
+	hostedEnv        = "REMOTECLI_HOSTED_URL"
 )
 
 // ProcessRunner abstrai o exec.CommandContext para permitir fake em testes.
@@ -66,35 +73,75 @@ func (OSRunner) Start(ctx context.Context, name string, args ...string) (Process
 
 func (OSRunner) LookPath(file string) (string, error) { return exec.LookPath(file) }
 
-// Config guarda preferências do tunnel.
+// Config guarda preferências de acesso remoto (LAN / tunnel / hosted).
 type Config struct {
-	Enabled  bool   `json:"enabled"`
+	// Mode: lan | tunnel | hosted. Vazio = lan se !Enabled, tunnel se Enabled (compat).
+	Mode     string `json:"mode,omitempty"`
+	Enabled  bool   `json:"enabled"` // true quando Mode==tunnel e há token (compat com código antigo)
 	Name     string `json:"name"`
-	Hostname string `json:"hostname"`
-	URL      string `json:"url"`
+	Hostname string `json:"hostname,omitempty"` // opcional; só exibição/docs (token cloudflared não exige)
+	URL      string `json:"url"`               // URL local que o tunnel expõe
 	Token    string `json:"token,omitempty"`
+	// HostedURL: URL do serviço central (modo hosted — roadmap).
+	HostedURL string `json:"hosted_url,omitempty"`
 }
 
-// Normalize preenche valores padrão.
+// Normalize preenche valores padrão e deriva Mode/Enabled.
+//
+// Regras:
+//   - Modo vazio + Enabled=false + sem HostedURL → LAN (padrão seguro).
+//   - Modo vazio + Enabled=true → tunnel.
+//   - Modo vazio + HostedURL → hosted (mesmo sem Enabled).
+//   - Mode==tunnel → Enabled = (Token != "").
+//   - Mode==lan|hosted → Enabled=false.
+//   - Enabled:true + Token → tunnel sobe.
 func (c *Config) Normalize() {
 	if c.Name == "" {
 		c.Name = DefaultName
 	}
-	if c.Hostname == "" {
-		c.Hostname = DefaultHostname
-	}
+	// Hostname NÃO é mais forçado (cada usuário define o próprio, se quiser).
 	if c.URL == "" {
 		c.URL = DefaultURL
 	}
+
+	// 1) Decidir o modo efetivo.
+	switch strings.ToLower(strings.TrimSpace(c.Mode)) {
+	case ModeLAN, ModeTunnel, ModeHosted:
+		c.Mode = strings.ToLower(strings.TrimSpace(c.Mode))
+	case "":
+		if c.HostedURL != "" {
+			c.Mode = ModeHosted
+		} else if c.Enabled {
+			c.Mode = ModeTunnel
+		} else {
+			c.Mode = ModeLAN
+		}
+	default:
+		c.Mode = ModeLAN
+	}
+
+	// 2) Normalizar Enabled conforme o modo.
+	switch c.Mode {
+	case ModeTunnel:
+		c.Enabled = c.Token != ""
+	case ModeLAN, ModeHosted:
+		c.Enabled = false
+	}
 }
 
-// DefaultConfig retorna a configuração padrão do tunnel.
+// AccessMode retorna o modo efetivo.
+func (c Config) AccessMode() string {
+	c.Normalize()
+	return c.Mode
+}
+
+// DefaultConfig retorna LAN-only (zero config).
 func DefaultConfig() Config {
 	return Config{
-		Enabled:  false,
-		Name:     DefaultName,
-		Hostname: DefaultHostname,
-		URL:      DefaultURL,
+		Mode:    ModeLAN,
+		Enabled: false,
+		Name:    DefaultName,
+		URL:     DefaultURL,
 	}
 }
 
@@ -112,15 +159,21 @@ type Manager struct {
 	startOnce sync.Once
 }
 
-// NewManager cria um novo manager. token pode vir de cfg.Token, env RELAY_TUNNEL_TOKEN ou keychain futuramente.
+// NewManager cria um novo manager. token: cfg.Token, REMOTECLI_TUNNEL_TOKEN ou RELAY_TUNNEL_TOKEN.
 func NewManager(cfg Config, runner ProcessRunner) *Manager {
 	if runner == nil {
 		runner = OSRunner{}
 	}
-	cfg.Normalize()
+	if cfg.Token == "" {
+		cfg.Token = os.Getenv(tokenEnvAlias)
+	}
 	if cfg.Token == "" {
 		cfg.Token = os.Getenv(tokenEnv)
 	}
+	if cfg.HostedURL == "" {
+		cfg.HostedURL = os.Getenv(hostedEnv)
+	}
+	cfg.Normalize()
 	return &Manager{cfg: cfg, runner: runner}
 }
 
@@ -162,11 +215,12 @@ func (m *Manager) Status() Status {
 }
 
 var (
-	ErrTokenMissing       = errors.New("token do Cloudflare Tunnel não configurado (RELAY_TUNNEL_TOKEN, keychain ou setup --tunnel-token)")
+	ErrTokenMissing       = errors.New("token do Cloudflare Tunnel não configurado (REMOTECLI_TUNNEL_TOKEN / RELAY_TUNNEL_TOKEN ou: remotecli access tunnel --token …)")
 	ErrCloudflaredMissing = errors.New("cloudflared não encontrado no PATH; instale com 'brew install cloudflared'")
-	ErrTunnelDisabled     = errors.New("tunnel desabilitado nas preferências")
+	ErrTunnelDisabled     = errors.New("tunnel desabilitado (modo LAN ou hosted). Use: remotecli access tunnel --token …")
 	ErrAlreadyRunning     = errors.New("tunnel já está em execução")
 	ErrNotRunning         = errors.New("tunnel não está em execução")
+	ErrHostedNotReady     = errors.New("modo hosted ainda não está disponível; use LAN ou tunnel do usuário")
 )
 
 // Start sobe o tunnel cloudflared apontando para a URL local.
