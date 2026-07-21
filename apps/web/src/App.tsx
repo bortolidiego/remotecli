@@ -71,12 +71,14 @@ export default function App() {
   const [scannedOffer, setScannedOffer] = useState('')
   const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
   const [terminalMirror, setTerminalMirror] = useState<{ text: string; source?: string; updatedAt?: string }>({ text: '' })
-  const [terminalOpen, setTerminalOpen] = useState(false) // fechado: chat limpo tipo Claude
+  const [showRawSafety, setShowRawSafety] = useState(false) // só se a resposta falhar no chat
+  const [rawOpen, setRawOpen] = useState(false)
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const lastChatReplyRef = useRef('')
+  const lastUserTextRef = useRef('')
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(
     () => (pairState ? { deviceId: pairState.deviceId, leaseToken: pairState.leaseToken } : null),
@@ -225,15 +227,10 @@ export default function App() {
             if (prev.text === raw && prev.updatedAt === snap.updated_at) return prev
             return { text: raw, source: snap.source, updatedAt: snap.updated_at }
           })
-          // Espelha resposta limpa no chat (sem dump TUI)
-          const reply = extractAssistantReply(raw)
-          if (
-            reply &&
-            reply !== lastChatReplyRef.current &&
-            !isPlaceholderReply(reply) &&
-            reply.length > 25
-          ) {
+          const reply = extractAssistantReply(raw, lastUserTextRef.current)
+          if (reply && reply !== lastChatReplyRef.current && !isPlaceholderReply(reply) && reply.length >= 6) {
             lastChatReplyRef.current = reply
+            setShowRawSafety(false)
             setLocalLog((log) => {
               if (log.some((m) => m.role === 'assistant' && m.text === reply)) return log
               return [...log, { id: `a-${Date.now()}`, role: 'assistant', text: reply.slice(0, 6000) }]
@@ -245,7 +242,7 @@ export default function App() {
       }
     }
     void tick()
-    const id = setInterval(tick, 1200)
+    const id = setInterval(tick, 1000)
     return () => {
       active = false
       clearInterval(id)
@@ -439,23 +436,26 @@ export default function App() {
       return
     }
 
+    const displayUser = text || (uploaded.length ? uploaded.map((a) => a.name).join(', ') : '')
+    lastUserTextRef.current = text || displayUser
+    setShowRawSafety(false)
+    setRawOpen(false)
     setLocalLog((log) => [
       ...log,
       {
         id: `u-${Date.now()}`,
         role: 'user',
-        text: text || (uploaded.length ? uploaded.map((a) => a.name).join(', ') : ''),
+        text: displayUser,
         attachments: uploaded,
       },
     ])
     setPromptText('')
     clearPendingAttachments()
 
-    // Snapshot baseline antes do envio
     const baseline = await fetchSessionOutput(sessionId, currentAuth)
       .then((s) => s.text || '')
       .catch(() => '')
-    lastChatReplyRef.current = extractAssistantReply(baseline)
+    lastChatReplyRef.current = extractAssistantReply(baseline, lastUserTextRef.current)
 
     try {
       const controller = new AbortController()
@@ -470,38 +470,37 @@ export default function App() {
       setBusy(false)
     }
 
-    // Poll agressivo até achar resposta limpa
-    void pollForAssistantReply(sessionId, currentAuth, lastChatReplyRef.current)
+    void pollForAssistantReply(sessionId, currentAuth, lastChatReplyRef.current, lastUserTextRef.current)
   }
 
   async function pollForAssistantReply(
     sessionId: string,
     currentAuth: LeaseAuth | string,
     beforeReply: string,
+    userText: string,
   ) {
-    const deadline = Date.now() + 150_000
+    const deadline = Date.now() + 90_000
     let lastRaw = ''
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 700))
+      await new Promise((r) => setTimeout(r, 600))
       const snap = await fetchSessionOutput(sessionId, currentAuth).catch(() => null)
       const raw = snap?.text || ''
       if (!raw || raw === lastRaw) continue
       lastRaw = raw
       setTerminalMirror({ text: raw, source: snap?.source, updatedAt: snap?.updated_at })
-      const now = extractAssistantReply(raw)
+      const now = extractAssistantReply(raw, userText)
       if (!now || isPlaceholderReply(now)) continue
       if (now === beforeReply || now === lastChatReplyRef.current) continue
-      // Aceita se mudou de forma clara ou cresceu
-      if (beforeReply && now.length < beforeReply.length + 15 && now.includes(beforeReply.slice(0, 40))) {
-        continue
-      }
       lastChatReplyRef.current = now
+      setShowRawSafety(false)
       setLocalLog((log) => {
         if (log.some((m) => m.role === 'assistant' && m.text === now)) return log
         return [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 6000) }]
       })
       return
     }
+    // Sem bolha limpa → libera raw só como rede de segurança
+    setShowRawSafety(true)
   }
 
   async function interruptCurrentTurn() {
@@ -853,18 +852,17 @@ export default function App() {
               </div>
             )}
 
-            {/* Terminal bruto opcional (fechado) — não é o chat */}
-            {terminalMirror.text && (
-              <div className={`terminal-panel ${terminalOpen ? 'open' : ''}`}>
+            {/* Raw bem escondido: só se a resposta não entrou no chat */}
+            {showRawSafety && terminalMirror.text && (
+              <div className="raw-safety">
                 <button
                   type="button"
-                  className="terminal-toggle"
-                  onClick={() => setTerminalOpen((v) => !v)}
-                  aria-expanded={terminalOpen}
+                  className="raw-safety-toggle"
+                  onClick={() => setRawOpen((v) => !v)}
                 >
-                  <span>{terminalOpen ? '▾' : '▸'} Raw (opcional)</span>
+                  {rawOpen ? '▾ Esconder log' : '▸ Resposta não apareceu? Ver log'}
                 </button>
-                {terminalOpen && <pre className="terminal-body">{terminalMirror.text}</pre>}
+                {rawOpen && <pre className="terminal-body">{terminalMirror.text}</pre>}
               </div>
             )}
           </div>
@@ -1059,31 +1057,59 @@ function isPlaceholderReply(s: string): boolean {
   )
 }
 
-/** Extrai texto útil da saída do terminal (sem TUI, sem “Resposta no Mac”). */
-function extractAssistantReply(raw: string): string {
+/**
+ * Extrai a resposta do agente do dump do terminal.
+ * Ex.: "Oi - recebi o teste." + parágrafo seguinte — sem hooks/TUI.
+ */
+function extractAssistantReply(raw: string, userText = ''): string {
   if (!raw) return ''
-  // Mantém quebras de linha (antes colapsava tudo e quebrava o extrator)
   const cleaned = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
-  const lines = cleaned.split(/\r?\n/)
+  const userNorm = normalizeChatLine(userText)
   const out: string[] = []
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) {
-      if (out.length > 0 && out[out.length - 1] !== '') out.push('')
-      continue
-    }
-    if (isTUINoiseLine(trimmed)) continue
-    out.push(trimmed)
+  for (const line of cleaned.split(/\r?\n/)) {
+    let t = line.trim()
+    if (!t) continue
+    // remove horário no fim da linha ("8:52 AM")
+    t = t.replace(/\s+\d{1,2}:\d{2}(\s*[AP]M)?\s*$/i, '').trim()
+    // remove bullet "› " / "> "
+    t = t.replace(/^[>›◆●◦·]\s*/, '').trim()
+    if (!t || isTUINoiseLine(t)) continue
+    // eco da mensagem do usuário
+    if (userNorm && normalizeChatLine(t) === userNorm) continue
+    if (userNorm && normalizeChatLine(t).startsWith(userNorm) && t.length < userNorm.length + 12) continue
+    out.push(t)
   }
-  while (out.length && out[out.length - 1] === '') out.pop()
   if (out.length === 0) return ''
 
-  const human = out.filter(looksHumanReply)
-  if (human.length === 0) return ''
-  // Só texto que parece resposta humana (evita status “Waiting…” virar bolha)
-  const reply = human.slice(-16).join('\n').trim()
-  if (reply.length < 8 || isPlaceholderReply(reply)) return ''
+  // Preferir linhas de prosa (2+ palavras ou cumprimento)
+  const prose = out.filter(isProseLine)
+  const pool = prose.length > 0 ? prose : out
+  // Bloco final = resposta mais recente
+  const reply = pool.slice(-12).join('\n').trim()
+  if (reply.length < 4 || isPlaceholderReply(reply)) return ''
+  if (userNorm && normalizeChatLine(reply) === userNorm) return ''
   return reply.slice(0, 6000)
+}
+
+function normalizeChatLine(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+\d{1,2}:\d{2}(\s*[ap]m)?\s*$/i, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function isProseLine(s: string): boolean {
+  if (isTUINoiseLine(s) || s.length < 3) return false
+  const words = s.split(/\s+/).filter(Boolean)
+  if (/^(oi|olá|ola|hey|hi)\b/i.test(s)) return true
+  if (words.length >= 3) return true
+  if (words.length >= 2 && s.length >= 10) return true
+  if (looksHumanReply(s)) return true
+  // frase com pontuação
+  if (/[.!?…]$/.test(s) && words.length >= 2) return true
+  return false
 }
 
 function isTUINoiseLine(s: string): boolean {

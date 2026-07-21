@@ -856,28 +856,22 @@ button:disabled {
   color: var(--text);
 }
 
-/* Raw terminal — discreto, fechado; o chat são as bolhas */
-.terminal-panel {
-  margin: 12px 0 8px;
+/* Rede de segurança: só aparece se o chat não capturou a resposta */
+.raw-safety {
+  margin: 16px 0 8px;
   border-radius: 12px;
-  background: #0c0c0b;
-  border: 1px solid var(--border);
+  border: 1px dashed var(--border);
   overflow: hidden;
-  min-height: 0;
-  opacity: 0.85;
+  opacity: 0.75;
 }
 
-.terminal-toggle {
+.raw-safety-toggle {
   width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
   padding: 8px 12px;
-  background: transparent;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
   text-align: left;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
 }
 
 .terminal-body {
@@ -889,10 +883,11 @@ button:disabled {
   color: #9a9890;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 28vh;
+  max-height: 24vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   border-top: 1px solid var(--border);
+  background: #0c0c0b;
 }
 
 .tabs-row {
