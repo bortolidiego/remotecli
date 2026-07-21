@@ -1049,7 +1049,13 @@ function isPlaceholderReply(s: string): boolean {
     lower.startsWith('mensagem enviada') ||
     lower.startsWith('mensagem digitada') ||
     lower.includes('ainda não espelhada') ||
-    lower.includes('no connection')
+    lower.includes('no connection') ||
+    lower.includes('waiting for response') ||
+    lower.includes('thought for') ||
+    lower.includes('[stop]') ||
+    /^remotecli\b/i.test(s.trim()) ||
+    // status intermediário da UI do agent, não resposta
+    (lower.includes('waiting') && lower.includes('response'))
   )
 }
 
@@ -1072,17 +1078,12 @@ function extractAssistantReply(raw: string): string {
   while (out.length && out[out.length - 1] === '') out.pop()
   if (out.length === 0) return ''
 
-  // Preferir o trecho final (resposta mais recente)
-  const joined = out.join('\n').trim()
   const human = out.filter(looksHumanReply)
-  if (human.length >= 2) {
-    // Últimos blocos humanos costumam ser a resposta
-    return human.slice(-12).join('\n').slice(0, 6000)
-  }
-  if (human.length === 1 && human[0].length > 20) return human[0].slice(0, 6000)
-  if (joined.length < 20) return ''
-  // Últimas ~40 linhas limpas
-  return out.slice(-40).join('\n').slice(0, 6000)
+  if (human.length === 0) return ''
+  // Só texto que parece resposta humana (evita status “Waiting…” virar bolha)
+  const reply = human.slice(-16).join('\n').trim()
+  if (reply.length < 8 || isPlaceholderReply(reply)) return ''
+  return reply.slice(0, 6000)
 }
 
 function isTUINoiseLine(s: string): boolean {
@@ -1119,6 +1120,13 @@ function isTUINoiseLine(s: string): boolean {
   if (s.includes('Grok 4.5') || s.includes('always-approve')) return true
   if (/^\[hooks/i.test(s)) return true
   if (s.startsWith('/') && s.split(' ').length === 1 && s.length < 80) return true
+  if (lower.includes('waiting for response')) return true
+  if (lower.startsWith('thought for')) return true
+  if (s.includes('[stop]')) return true
+  if (/^remotecli\b/i.test(s)) return true
+  if (s === '>' || s === '›' || /^[>›]\s*$/.test(s)) return true
+  // linha só com símbolos de UI
+  if (/^[◆◇●○◦·↑↓←→…\.\,\s\dks\[\]\(\)]+$/i.test(s) && s.length < 40) return true
   return false
 }
 

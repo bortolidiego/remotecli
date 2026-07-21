@@ -78,9 +78,10 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 }
 
 // deliverToSession:
-// 1) maestri ask síncrono (até 3s) → devolve a resposta se for rápida
-// 2) se demorar/falhar: fire-and-forget (inject paste agora + outbox) e retorna imediatamente
-// 3) sem nome: inject direto e retorna imediatamente
+// Entrega a mensagem UMA vez. Antes: paste + outbox (bridge ask) = texto duplicado no Mac.
+// 1) maestri ask rápido (workers conectados) — se ok, não cola de novo
+// 2) senão: só paste no terminal (1x). Bridge só espelha snapshot, não reenvia.
+// 3) se paste falhar: aí sim outbox pro bridge ask
 func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) (reply, mode string, err error) {
 	name := strings.TrimSpace(sess.MaestriAgentName)
 	cli := strings.TrimSpace(sess.MaestriCLI)
@@ -89,29 +90,32 @@ func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) 
 	}
 	socket := strings.TrimSpace(sess.MaestriSocket)
 
-	// Sempre registra o alvo para o bridge poder espelhar.
+	// Só registra alvo p/ snapshot — NÃO enfileira ask se formos colar.
 	_ = RegisterWatchTarget(name, cli, socket)
 
 	if name != "" {
-		// Tentativa direta (rápida em workers) — no hot path não esperamos mais que 3s.
+		// Workers conectados: ask uma vez (sem paste).
 		out, runErr := runMaestriAsk(cli, socket, name, text, 3*time.Second)
 		if runErr == nil {
 			msg := cleanTerminalText(out)
 			if msg == "" {
-				msg = "Mensagem entregue. Continue no Mac se quiser."
+				msg = "Mensagem entregue."
 			}
 			_ = writeSnapshot(name, msg)
 			return msg, "maestri_ask", nil
 		}
 
-		// Fire-and-forget: enfileira para o bridge e injecta no Mac AGORA.
-		_, _ = enqueuePhoneBridge(name, text, cli, socket)
-		_ = macOSFocusPasteAndReturn(text, name)
-
+		// Sessão local (self / sem conexão): cola UMA vez. Não enqueue ask.
+		if injErr := macOSFocusPasteAndReturn(text, name); injErr != nil {
+			// Último recurso: bridge ask (sem paste — paste já falhou).
+			if _, qErr := enqueuePhoneBridge(name, text, cli, socket); qErr != nil {
+				return "", "local_inject", injErr
+			}
+			return "", "phone_bridge", nil
+		}
 		return "", "delivered", nil
 	}
 
-	// Sem nome: fallback de inject direto.
 	if injErr := macOSFocusPasteAndReturn(text, name); injErr != nil {
 		return "", "local_inject", injErr
 	}
