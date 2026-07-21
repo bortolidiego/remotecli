@@ -25,13 +25,14 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // Força o SW a pegar versão nova assim que o servidor muda (evita PWA antiga no iPhone)
       registerType: 'autoUpdate',
       manifest: {
-        name: 'Relay',
-        short_name: 'Relay',
-        description: 'Relay secure local sharing',
-        theme_color: '#0f172a',
-        background_color: '#0f172a',
+        name: 'Remote CliControl',
+        short_name: 'RemoteCLI',
+        description: 'Controle remoto de CLIs no Mac',
+        theme_color: '#141413',
+        background_color: '#141413',
         display: 'standalone',
         start_url: '/',
         icons: [
@@ -39,10 +40,30 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
+        // Não cachear index/API para sempre puxar o build novo do Mac
+        navigateFallback: '/index.html',
+        runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'pages',
+              networkTimeoutSeconds: 3,
+            },
+          },
+          {
+            urlPattern: /\/assets\/.*/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'assets',
+              networkTimeoutSeconds: 3,
+            },
+          },
+        ],
       },
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
     }),
   ],

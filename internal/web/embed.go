@@ -57,6 +57,8 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; worker-src 'self';")
-	w.Header().Set("Cache-Control", "no-store")
+	// HTML e SW nunca em cache; assets com hash podem ser cacheados pelo browser.
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", time.Unix(0, 0).UTC().Format(http.TimeFormat))
 }
