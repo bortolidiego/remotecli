@@ -71,9 +71,10 @@ export default function App() {
   const [scannedOffer, setScannedOffer] = useState('')
   const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
   const [terminalMirror, setTerminalMirror] = useState<{ text: string; source?: string; updatedAt?: string }>({ text: '' })
-  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(true) // painel grande aberto por padrão
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const cameraInputRef = useRef<HTMLInputElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(
@@ -399,36 +400,39 @@ export default function App() {
     }
   }
 
-  /** Envia e espera resposta real da sessão (ida e volta, tipo Claude). */
+  /** Envia na hora (não trava 90s). Resposta chega via poll em background. */
   async function sendToSession() {
     if (!auth || !selectedId || (!promptText.trim() && pendingAttachments.length === 0) || busy) return
     const text = promptText.trim()
     const caption = text || undefined
     const currentAuth = auth
+    const sessionId = selectedId
     setBusy(true)
     setMessage(null)
 
-    const uploaded = await uploadAndSendAttachments(selectedId, currentAuth, caption)
-    const userText = text || (uploaded.length > 0 ? '[imagem anexada]' : '')
-    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text: userText, attachments: uploaded }])
+    const uploaded = await uploadAndSendAttachments(sessionId, currentAuth, caption)
+    const userText = text || (uploaded.length > 0 ? '' : '')
+    setLocalLog((log) => [
+      ...log,
+      {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        text: userText,
+        attachments: uploaded,
+      },
+    ])
     setPromptText('')
     clearPendingAttachments()
 
-    // Só anexos: upload já entregou a mensagem no Mac — não POST message vazio.
     if (!text) {
       setBusy(false)
       return
     }
 
-    setLocalLog((log) => [
-      ...log,
-      { id: `a-${Date.now()}-wait`, role: 'assistant', text: 'Enviado. Aguardando resposta da sessão…' },
-    ])
-    let controller: AbortController | null = null
     try {
-      controller = new AbortController()
-      const timeout = setTimeout(() => controller?.abort(), 120_000)
-      const res = await sendSessionMessage(selectedId, text, currentAuth, controller.signal)
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15_000)
+      const res = await sendSessionMessage(sessionId, text, currentAuth, controller.signal)
       clearTimeout(timeout)
       const reply = extractAssistantReply(res.reply || '')
       const isStatusOnly =
@@ -438,55 +442,48 @@ export default function App() {
         reply.startsWith('Mensagem digitada') ||
         reply.startsWith('Aguardando') ||
         reply.includes('ainda não espelhada') ||
-        reply.includes('Ver terminal se quiser o raw')
+        reply.includes('Ver terminal se quiser o raw') ||
+        res.mode === 'delivered' ||
+        res.mode === 'session_type' ||
+        res.mode === 'phone_bridge'
 
-      setLocalLog((log) => {
-        const base = log.filter((m) => !m.id.endsWith('-wait'))
-        if (!isStatusOnly) {
-          return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: reply }]
-        }
-        return base
-      })
-
-      if (isStatusOnly) {
-        const before = await fetchSessionOutput(selectedId, currentAuth).then((s) => cleanMirrorText(s.text || '')).catch(() => '')
-        const deadline = Date.now() + 90_000
-        let last = before
-        while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 2000))
-          const snap = await fetchSessionOutput(selectedId, currentAuth).catch(() => null)
-          const rawNow = snap?.text || ''
-          const now = extractAssistantReply(cleanMirrorText(rawNow))
-          if (now && now !== last && substantialChange(last, now) && !now.toLowerCase().includes('no connection')) {
-            setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 4000) }])
-            return
-          }
-          last = now || last
-        }
-        setLocalLog((log) => [
-          ...log,
-          {
-            id: `a-${Date.now()}`,
-            role: 'assistant',
-            text: reply || 'Resposta ainda não espelhada no celular. Toque ↻ ou veja no Mac.',
-            isFallback: true,
-          },
-        ])
+      if (!isStatusOnly) {
+        setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: reply }])
+        setBusy(false)
+        return
       }
     } catch (err) {
-      if (controller?.signal.aborted) {
-        setMessage('Tempo esgotado aguardando a sessão. A mensagem foi entregue; toque ↻ para ver a resposta.')
-      } else {
+      if (!(err instanceof Error && err.name === 'AbortError')) {
         setMessage(String(err))
       }
-      setLocalLog((log) => {
-        const base = log.filter((m) => !m.id.endsWith('-wait'))
-        return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: `Falha: ${String(err)}` }]
-      })
     } finally {
       setBusy(false)
-      controller?.abort()
     }
+
+    // Poll rápido em background — não bloqueia o composer
+    void (async () => {
+      const before = await fetchSessionOutput(sessionId, currentAuth)
+        .then((s) => extractAssistantReply(cleanMirrorText(s.text || '')))
+        .catch(() => '')
+      let last = before
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 900))
+        const snap = await fetchSessionOutput(sessionId, currentAuth).catch(() => null)
+        const now = extractAssistantReply(cleanMirrorText(snap?.text || ''))
+        if (
+          now &&
+          now !== last &&
+          substantialChange(last, now) &&
+          !now.toLowerCase().includes('no connection') &&
+          !now.includes('Ver terminal se quiser o raw')
+        ) {
+          setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 4000) }])
+          return
+        }
+        if (now) last = now
+      }
+    })()
   }
 
   function cleanMirrorText(s: string): string {
@@ -655,7 +652,7 @@ export default function App() {
         </header>
         <div className="center-screen">
           <h1>Emparelhar</h1>
-          <p>Escaneie o QR do Mac (mesma Wi‑Fi). Nada privado é lido antes do pareamento.</p>
+          <p>Escaneie o QR do Mac (mesma Wi‑Fi).</p>
           <label className="field">
             Nome deste iPhone
             <input value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
@@ -730,9 +727,7 @@ export default function App() {
                       </div>
                     </div>
                     <p className="session-card-preview">
-                      {session.codexThreadId
-                        ? 'Toque para conversar com o Codex deste terminal.'
-                        : 'Toque para digitar e enviar comandos ao Mac.'}
+                      {session.codexThreadId ? 'Codex' : harnessLabel(session)}
                     </p>
                     <p className="session-card-path">{shortCwd(session.cwd)}</p>
                   </button>
@@ -793,7 +788,7 @@ export default function App() {
           aria-selected={tab === 'digitar'}
           onClick={() => setTab('digitar')}
         >
-          {hasCodex ? 'Chat' : 'Digitar'}
+          Chat
         </button>
         <button
           type="button"
@@ -809,15 +804,8 @@ export default function App() {
       {tab === 'digitar' ? (
         <div className="screen">
           <div className="chat-scroll" ref={chatScrollRef}>
-            <div className="chat-intro">
-              {hasCodex
-                ? 'Converse com o Codex deste terminal.'
-                : isMaestri
-                  ? `Como no Claude: digite aqui para ${session?.maestri_agent_name || sessionTitle(session!)}.`
-                  : 'Digite e envie — a mensagem vai para esta sessão no Mac.'}
-            </div>
-
-            {isMaestri && terminalMirror.text && (
+            {/* Terminal / contexto — grande, aberto por padrão (sem copy de mockup) */}
+            {(isMaestri || terminalMirror.text) && (
               <div className={`terminal-panel ${terminalOpen ? 'open' : ''}`}>
                 <button
                   type="button"
@@ -825,11 +813,12 @@ export default function App() {
                   onClick={() => setTerminalOpen((v) => !v)}
                   aria-expanded={terminalOpen}
                 >
-                  <span>{terminalOpen ? '▾' : '▸'} Ver terminal</span>
-                  <span className="terminal-source">{terminalMirror.source || 'espelho'}</span>
+                  <span>{terminalOpen ? '▾' : '▸'} Terminal</span>
                 </button>
                 {terminalOpen && (
-                  <pre className="terminal-body">{terminalMirror.text}</pre>
+                  <pre className="terminal-body">
+                    {terminalMirror.text || '…'}
+                  </pre>
                 )}
               </div>
             )}
@@ -897,40 +886,56 @@ export default function App() {
               </div>
             )}
             <div className="composer">
-              <textarea
-                value={promptText}
-                onChange={(e) => setPromptText(e.target.value)}
-                onPaste={handlePaste}
-                placeholder={
-                  hasCodex
-                    ? 'Mensagem para o Codex…'
-                    : isMaestri
-                      ? 'Mensagem para a sessão Maestri…'
-                      : 'Comando ou texto para o Mac…'
-                }
-                rows={1}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    if (hasCodex) void sendTurn()
-                    else void sendToSession()
-                  }
-                }}
-              />
-              <div className="composer-actions">
+              <div className="composer-row">
                 <button
                   type="button"
-                  className="composer-chip"
+                  className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Anexar arquivo"
-                  title="Anexar arquivo"
+                  aria-label="Anexar"
+                  title="Anexar arquivo ou foto"
                 >
-                  +
+                  📎
                 </button>
+                <button
+                  type="button"
+                  className="attach-btn"
+                  onClick={() => cameraInputRef.current?.click()}
+                  aria-label="Foto"
+                  title="Tirar foto"
+                >
+                  📷
+                </button>
+                <textarea
+                  value={promptText}
+                  onChange={(e) => setPromptText(e.target.value)}
+                  onPaste={handlePaste}
+                  placeholder="Mensagem…"
+                  rows={1}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      if (hasCodex) void sendTurn()
+                      else void sendToSession()
+                    }
+                  }}
+                />
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept={ACCEPT_TYPES}
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const files = e.target.files
+                    if (!files) return
+                    for (let i = 0; i < files.length; i++) addPendingAttachment(files[i])
+                    e.target.value = ''
+                  }}
+                />
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
                   style={{ display: 'none' }}
                   onChange={(e) => {
                     const files = e.target.files
@@ -951,7 +956,6 @@ export default function App() {
                     ■
                   </button>
                 )}
-                <span className="spacer" />
                 <button
                   type="button"
                   className="send-btn"
@@ -966,7 +970,6 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {busy && <p className="composer-hint">Enviando para a sessão…</p>}
             {message && <p className="notice" style={{ marginTop: 8 }}>{message}</p>}
           </div>
         </div>

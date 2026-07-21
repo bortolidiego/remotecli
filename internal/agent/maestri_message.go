@@ -15,7 +15,7 @@ import (
 	"github.com/bortolidiego/relay/shared/contracts"
 )
 
-// handleSessionMessage — autonomia tipo app Claude (ida e volta).
+// handleSessionMessage — fire-and-forget: entrega rápida e resposta chega via /output.
 func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, sessionID string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
@@ -40,7 +40,7 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 
-	// Codex
+	// Codex mantém ack rápido (já era assíncrono).
 	if sess.CodexThreadID != nil && *sess.CodexThreadID != "" {
 		threadID := *sess.CodexThreadID
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -59,7 +59,7 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 			"status":  "ok",
 			"mode":    "codex_turn",
 			"turn_id": turnID,
-			"reply":   "Mensagem enviada ao Codex. Acompanhe a resposta no Mac ou aguarde o espelho.",
+			"reply":   "",
 		})
 		return
 	}
@@ -69,6 +69,7 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error(), "mode": mode})
 		return
 	}
+	// Fire-and-forget: reply vem vazio; PWA poll /output para pegar a resposta real.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"mode":   mode,
@@ -77,9 +78,9 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 }
 
 // deliverToSession:
-// 1) maestri ask síncrono (workers) → devolve a resposta
-// 2) se self/sem conexão: enfileira, injecta imediatamente e espera reply OU delta por até 90s
-// 3) fallback: digita no Mac (e ainda tenta mirror por ~45s se tiver name)
+// 1) maestri ask síncrono (até 3s) → devolve a resposta se for rápida
+// 2) se demorar/falhar: fire-and-forget (inject paste agora + outbox) e retorna imediatamente
+// 3) sem nome: inject direto e retorna imediatamente
 func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) (reply, mode string, err error) {
 	name := strings.TrimSpace(sess.MaestriAgentName)
 	cli := strings.TrimSpace(sess.MaestriCLI)
@@ -92,8 +93,8 @@ func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) 
 	_ = RegisterWatchTarget(name, cli, socket)
 
 	if name != "" {
-		// Tentativa direta (rápida em workers)
-		out, runErr := runMaestriAsk(cli, socket, name, text, 20*time.Second)
+		// Tentativa direta (rápida em workers) — no hot path não esperamos mais que 3s.
+		out, runErr := runMaestriAsk(cli, socket, name, text, 3*time.Second)
 		if runErr == nil {
 			msg := cleanTerminalText(out)
 			if msg == "" {
@@ -103,40 +104,18 @@ func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) 
 			return msg, "maestri_ask", nil
 		}
 
-		// Self / sem conexão: enfileira e injecta imediatamente como backup.
-		jobID, qErr := enqueuePhoneBridge(name, text, cli, socket)
-		baseline := cleanTerminalText(readSnapshot(name))
-		if baseline == "" {
-			if fresh, _ := snapshotNow(cli, socket, name, 5*time.Second); fresh != "" {
-				baseline = fresh
-			}
-		}
-
-		// Entrega a mensagem no Mac AGORA — não espera bridge.
+		// Fire-and-forget: enfileira para o bridge e injecta no Mac AGORA.
+		_, _ = enqueuePhoneBridge(name, text, cli, socket)
 		_ = macOSFocusPasteAndReturn(text, name)
 
-		if qErr == nil {
-			// Loop único até 90s: reply do bridge OU delta do terminal.
-			if rep, delta := waitForReplyOrDelta(jobID, name, cli, socket, baseline, 90*time.Second); rep != "" {
-				clean := cleanTerminalText(rep)
-				_ = writeSnapshot(name, clean)
-				return clean, "maestri_ask", nil
-			} else if delta != "" {
-				return delta, "terminal_mirror", nil
-			}
-		} else if delta := waitForTerminalDelta(name, cli, socket, baseline, 90*time.Second); delta != "" {
-			// Outbox falhou: ainda tenta espelhar o que o inject mostrou.
-			return delta, "terminal_mirror", nil
-		}
-
-		return "Mensagem enviada à sessão. Resposta ainda não espelhada — toque ↻ ou veja no Mac.", "phone_bridge", nil
+		return "", "delivered", nil
 	}
 
 	// Sem nome: fallback de inject direto.
 	if injErr := macOSFocusPasteAndReturn(text, name); injErr != nil {
 		return "", "local_inject", injErr
 	}
-	return "Mensagem digitada no Mac. A resposta aparece no Mac; o espelho no celular melhora com o bridge rcli-phone ativo.", "session_type", nil
+	return "", "session_type", nil
 }
 
 // waitForReplyOrDelta espera até 90s por uma reply do bridge ou por um delta no terminal.
@@ -377,10 +356,10 @@ func (a *Agent) handleSessionOutput(w http.ResponseWriter, r *http.Request, sess
 }
 
 // ProcessOutboxOnce — tick da ponte rcli-phone.
-// A) entrega mensagens do celular nas sessões e grava replies.
+// A) entrega mensagens do celular nas sessões e grava replies (sem bloquear snapshot).
 // B) atualiza snapshots dos alvos observados (watch-targets + jobs).
 func ProcessOutboxOnce() (processed int, err error) {
-	// --- A) Processa outbox -------------------------------------------------
+	// --- A) Processa outbox sem travar o resto ------------------------------
 	dir := outboxPath()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -390,6 +369,8 @@ func ProcessOutboxOnce() (processed int, err error) {
 			return 0, err
 		}
 	}
+
+	askJobs := make(chan outboxJob, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -410,28 +391,36 @@ func ProcessOutboxOnce() (processed int, err error) {
 		}
 		// Garante que o alvo está sendo espelhado.
 		_ = RegisterWatchTarget(job.Target, cli, job.Socket)
-
-		// Espera a resposta completa do agente (até 3 min) — é o “espelho” no celular
-		out, aerr := runMaestriAsk(cli, job.Socket, job.Target, job.Text, 3*time.Minute)
-		if aerr != nil {
-			// Mesmo sem reply, atualiza o snapshot do painel via check.
-			_, _ = snapshotNow(cli, job.Socket, job.Target, 8*time.Second)
-			// Não descarta imediatamente: deixa job se < 20min para retry.
-			meta, _ := os.Stat(path)
-			if meta != nil && time.Since(meta.ModTime()) > 20*time.Minute {
-				_ = os.Remove(path)
-			}
-			continue
-		}
-		clean := cleanTerminalText(out)
-		if job.ID != "" {
-			_ = writeReply(job.ID, clean)
-		}
-		// Atualiza snapshot do alvo com a resposta fresca.
-		_ = writeSnapshot(job.Target, clean)
-		_ = os.Remove(path)
-		processed++
+		askJobs <- job
 	}
+	close(askJobs)
+
+	// Roda asks em goroutine para não bloquear o snapshot geral (timeout menor: 60s).
+	go func() {
+		for job := range askJobs {
+			cli := job.CLI
+			if cli == "" {
+				cli = "maestri"
+			}
+			out, aerr := runMaestriAsk(cli, job.Socket, job.Target, job.Text, 60*time.Second)
+			path := filepath.Join(dir, fmt.Sprintf("%s-%s.json", job.ID, sanitizeFile(job.Target)))
+			if aerr != nil {
+				// Mesmo sem reply, atualiza o snapshot do painel via check.
+				_, _ = snapshotNow(cli, job.Socket, job.Target, 8*time.Second)
+				meta, _ := os.Stat(path)
+				if meta != nil && time.Since(meta.ModTime()) > 20*time.Minute {
+					_ = os.Remove(path)
+				}
+				continue
+			}
+			clean := cleanTerminalText(out)
+			if job.ID != "" {
+				_ = writeReply(job.ID, clean)
+			}
+			_ = writeSnapshot(job.Target, clean)
+			_ = os.Remove(path)
+		}
+	}()
 
 	// --- B) Espelho contínuo de todos os alvos observados -------------------
 	// Erros aqui não falham o tick — apenas logamos no stderr.
@@ -439,5 +428,6 @@ func ProcessOutboxOnce() (processed int, err error) {
 		fmt.Fprintf(os.Stderr, "snapshotAllTargets: %v\n", serr)
 	}
 
-	return processed, nil
+	// Não retornamos contagem exata (ask async); callers só precisam saber que o tick rodou.
+	return 0, nil
 }

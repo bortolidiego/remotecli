@@ -338,17 +338,7 @@ button:disabled {
   -webkit-overflow-scrolling: touch;
 }
 
-.chat-intro {
-  max-width: 80%;
-  margin: 8px 0 20px;
-  padding: 10px 14px;
-  border-radius: 14px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  font-size: 14px;
-  line-height: 1.45;
-  color: var(--text-secondary);
-}
+/* chat-intro removido — app de produção, sem copy de mockup */
 
 .msg-row {
   display: flex;
@@ -466,16 +456,22 @@ button:disabled {
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 24px;
-  padding: 10px 12px 10px;
+  padding: 8px 10px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
 }
 
-.composer textarea {
-  width: 100%;
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.composer-row textarea {
+  flex: 1;
   border: 0;
   outline: none;
   resize: none;
@@ -483,14 +479,31 @@ button:disabled {
   color: var(--text);
   font-size: 16px;
   line-height: 1.4;
-  min-height: 24px;
+  min-height: 28px;
   max-height: 140px;
-  padding: 4px 4px 0;
+  padding: 8px 6px;
   font-family: inherit;
 }
 
-.composer textarea::placeholder {
+.composer-row textarea::placeholder {
   color: var(--text-muted);
+}
+
+.attach-btn {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.attach-btn:active {
+  background: var(--bg-card);
 }
 
 .composer-actions {
@@ -836,17 +849,22 @@ button:disabled {
   color: var(--text);
 }
 
-/* Terminal mirror panel (Maestri) */
+/* Terminal — painel grande (screenshot inicial da sessão) */
 .terminal-panel {
-  margin: 4px 0 18px;
-  border-radius: var(--radius-sm);
-  background: #0f0f0e;
+  margin: 0 0 12px;
+  border-radius: 16px;
+  background: #0c0c0b;
   border: 1px solid var(--border);
   overflow: hidden;
+  min-height: 42vh;
 }
 
 .terminal-panel.open {
-  background: #0f0f0e;
+  min-height: 42vh;
+}
+
+.terminal-panel:not(.open) {
+  min-height: 0;
 }
 
 .terminal-toggle {
@@ -854,28 +872,31 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 12px;
+  padding: 12px 14px;
   background: transparent;
   font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-secondary);
   text-align: left;
+  border-bottom: 1px solid transparent;
 }
 
-.terminal-source {
-  color: var(--text-muted);
-  font-size: 11px;
+.terminal-panel.open .terminal-toggle {
+  border-bottom-color: var(--border);
 }
 
 .terminal-body {
   margin: 0;
-  padding: 12px;
+  padding: 14px 16px 20px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #c8c6bf;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
+  min-height: calc(42vh - 48px);
+  max-height: 55vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
