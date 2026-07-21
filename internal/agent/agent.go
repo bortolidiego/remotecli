@@ -585,6 +585,13 @@ func (a *Agent) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.registry.SetSessionMetadata(meta)
+	if strings.TrimSpace(meta.MaestriAgentName) != "" {
+		cli := strings.TrimSpace(meta.MaestriCLI)
+		if cli == "" {
+			cli = "maestri"
+		}
+		_ = RegisterWatchTarget(meta.MaestriAgentName, cli, strings.TrimSpace(meta.MaestriSocket))
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 

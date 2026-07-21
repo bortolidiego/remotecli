@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   decideApproval,
@@ -50,6 +50,7 @@ export default function App() {
   const [localLog, setLocalLog] = useState<{ id: string; role: 'user' | 'assistant'; text: string }[]>([])
   const [scannedOffer, setScannedOffer] = useState('')
   const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
+  const [terminalMirror, setTerminalMirror] = useState<{ text: string; source?: string; updatedAt?: string }>({ text: '' })
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(
     () => (pairState ? { deviceId: pairState.deviceId, leaseToken: pairState.leaseToken } : null),
@@ -172,6 +173,44 @@ export default function App() {
       .catch((err) => setMessage(String(err)))
   }, [auth, selectedId])
 
+  // Espelho ao vivo do terminal para sessões maestri (aba Digitar).
+  useEffect(() => {
+    if (!auth || !selectedId || view !== 'session' || tab !== 'digitar') return
+    const sessionId = selectedId
+    const currentAuth = auth
+    let active = true
+    async function tick() {
+      try {
+        const snap = await fetchSessionOutput(sessionId, currentAuth)
+        if (!active) return
+        if (snap.text || snap.updated_at) {
+          setTerminalMirror((prev) => {
+            if (prev.text === snap.text && prev.updatedAt === snap.updated_at) return prev
+            return { text: snap.text || '', source: snap.source, updatedAt: snap.updated_at }
+          })
+        }
+      } catch (err) {
+        // Silencioso: o mirror não deve poluir com erros transitórios.
+      }
+    }
+    void tick()
+    const id = setInterval(tick, 2500)
+    return () => {
+      active = false
+      clearInterval(id)
+    }
+  }, [auth, selectedId, view, tab])
+
+  const refreshMirror = useCallback(async () => {
+    if (!auth || !selectedId) return
+    try {
+      const snap = await fetchSessionOutput(selectedId, auth)
+      setTerminalMirror({ text: snap.text || '', source: snap.source, updatedAt: snap.updated_at })
+    } catch (err) {
+      setMessage(String(err))
+    }
+  }, [auth, selectedId])
+
   useEffect(() => {
     if (!auth || !pairState) return
     const state = pairState
@@ -257,15 +296,21 @@ export default function App() {
       ...log,
       { id: `a-${Date.now()}-wait`, role: 'assistant', text: 'Enviado. Aguardando resposta da sessão…' },
     ])
+    let controller: AbortController | null = null
     try {
+      controller = new AbortController()
+      const timeout = setTimeout(() => controller?.abort(), 120_000)
       // Pode demorar: no orquestrador o bridge espera o agente responder (até ~90s)
-      const res = await sendSessionMessage(selectedId, text, auth)
+      const res = await sendSessionMessage(selectedId, text, auth, controller.signal)
+      clearTimeout(timeout)
       const reply = (res.reply || '').trim()
       const isStatusOnly =
         !reply ||
         reply.startsWith('Mensagem enviada') ||
         reply.startsWith('Mensagem a caminho') ||
-        reply.startsWith('Mensagem digitada')
+        reply.startsWith('Mensagem digitada') ||
+        reply.startsWith('Aguardando') ||
+        reply.includes('ainda não espelhada')
 
       setLocalLog((log) => {
         const base = log.filter((m) => !m.id.endsWith('-wait'))
@@ -277,19 +322,20 @@ export default function App() {
       })
 
       if (isStatusOnly) {
-        // poll output por um tempo
-        const before = await fetchSessionOutput(selectedId, auth).then((s) => s.text || '').catch(() => '')
-        const deadline = Date.now() + 60_000
+        // poll output por um tempo, aceitando qualquer mudança substancial
+        const before = await fetchSessionOutput(selectedId, auth).then((s) => cleanMirrorText(s.text || '')).catch(() => '')
+        const deadline = Date.now() + 90_000
         let last = before
         while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 3000))
+          await new Promise((r) => setTimeout(r, 2000))
           const snap = await fetchSessionOutput(selectedId, auth).catch(() => null)
-          const now = snap?.text || ''
-          if (now && now !== last && now.length > last.length + 10) {
+          const rawNow = snap?.text || ''
+          const now = cleanMirrorText(rawNow)
+          if (now && now !== last && substantialChange(last, now)) {
             let delta = now
             if (last && now.startsWith(last)) delta = now.slice(last.length)
-            delta = delta.trim()
-            if (delta.length > 15 && !delta.includes('No connection')) {
+            delta = cleanMirrorText(delta)
+            if (delta.length > 20 && !delta.toLowerCase().includes('no connection')) {
               setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: delta.slice(0, 4000) }])
               return
             }
@@ -301,19 +347,34 @@ export default function App() {
           {
             id: `a-${Date.now()}`,
             role: 'assistant',
-            text: reply || 'Resposta ainda não espelhada no celular. Veja o Mac — a mensagem já entrou na sessão.',
+            text: reply || 'Resposta ainda não espelhada no celular. Toque ↻ ou veja no Mac.',
           },
         ])
       }
     } catch (err) {
-      setMessage(String(err))
+      if (controller?.signal.aborted) {
+        setMessage('Tempo esgotado aguardando a sessão. A mensagem foi entregue; toque ↻ para ver a resposta.')
+      } else {
+        setMessage(String(err))
+      }
       setLocalLog((log) => {
         const base = log.filter((m) => !m.id.endsWith('-wait'))
         return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: `Falha: ${String(err)}` }]
       })
     } finally {
       setBusy(false)
+      controller?.abort()
     }
+  }
+
+  function cleanMirrorText(s: string): string {
+    return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, ' ').trim()
+  }
+
+  function substantialChange(before: string, now: string): boolean {
+    if (before === '') return now.length > 20
+    if (now.length <= before.length) return now.length > 40
+    return now.length - before.length > 10
   }
 
   async function interruptCurrentTurn() {
@@ -576,7 +637,12 @@ export default function App() {
             {session ? harnessLabel(session) : '…'} · {linkLabel}
           </span>
         </h1>
-        <button className="icon-btn" type="button" onClick={() => void refreshPrivate()} aria-label="Atualizar">
+        <button
+          className="icon-btn"
+          type="button"
+          onClick={() => { void refreshPrivate(); void refreshMirror() }}
+          aria-label="Atualizar"
+        >
           ↻
         </button>
       </header>
@@ -626,6 +692,16 @@ export default function App() {
                 </>
               )}
             </div>
+
+            {isMaestri && terminalMirror.text && (
+              <div className="terminal-panel">
+                <div className="terminal-header">
+                  <span>Última saída do terminal</span>
+                  <span className="terminal-source">{terminalMirror.source || 'espelho'}</span>
+                </div>
+                <pre className="terminal-body">{terminalMirror.text}</pre>
+              </div>
+            )}
 
             {localLog.map((msg) => (
               <div key={msg.id} className={`msg-row ${msg.role}`}>

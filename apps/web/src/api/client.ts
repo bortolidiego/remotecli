@@ -61,17 +61,19 @@ export async function sendSessionMessage(
   sessionId: string,
   text: string,
   auth: LeaseAuth | string,
+  signal?: AbortSignal,
 ): Promise<{ status: string; mode: string; reply?: string; turn_id?: string }> {
   return api(`/sessions/${encodeURIComponent(sessionId)}/message`, {
     method: 'POST',
     body: JSON.stringify({ text }),
+    signal,
   }, auth)
 }
 
 export async function fetchSessionOutput(
   sessionId: string,
   auth: LeaseAuth | string,
-): Promise<{ text: string; source?: string; name?: string }> {
+): Promise<{ text: string; source?: string; name?: string; updated_at?: string }> {
   return api(`/sessions/${encodeURIComponent(sessionId)}/output`, {}, auth)
 }
 

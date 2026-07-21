@@ -78,8 +78,8 @@ func (a *Agent) handleSessionMessage(w http.ResponseWriter, r *http.Request, ses
 
 // deliverToSession:
 // 1) maestri ask síncrono (workers) → devolve a resposta
-// 2) se self/sem conexão: fila + espera resposta do bridge (ida e volta)
-// 3) fallback: digita no Mac
+// 2) se self/sem conexão: enfileira, injecta imediatamente e espera reply OU delta por até 90s
+// 3) fallback: digita no Mac (e ainda tenta mirror por ~45s se tiver name)
 func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) (reply, mode string, err error) {
 	name := strings.TrimSpace(sess.MaestriAgentName)
 	cli := strings.TrimSpace(sess.MaestriCLI)
@@ -88,34 +88,117 @@ func (a *Agent) deliverToSession(sess contracts.SessionDescriptor, text string) 
 	}
 	socket := strings.TrimSpace(sess.MaestriSocket)
 
-	if name != "" && socket != "" {
+	// Sempre registra o alvo para o bridge poder espelhar.
+	_ = RegisterWatchTarget(name, cli, socket)
+
+	if name != "" {
 		// Tentativa direta (rápida em workers)
 		out, runErr := runMaestriAsk(cli, socket, name, text, 20*time.Second)
 		if runErr == nil {
-			msg := strings.TrimSpace(out)
+			msg := cleanTerminalText(out)
 			if msg == "" {
 				msg = "Mensagem entregue. Continue no Mac se quiser."
 			}
+			_ = writeSnapshot(name, msg)
 			return msg, "maestri_ask", nil
 		}
 
-		// Self / sem conexão: bridge faz o ask e grava a resposta
+		// Self / sem conexão: enfileira e injecta imediatamente como backup.
 		jobID, qErr := enqueuePhoneBridge(name, text, cli, socket)
-		if qErr == nil {
-			// Espera o bridge (rcli-phone) entregar e gravar reply — até 90s
-			if rep := waitReply(jobID, 90*time.Second); rep != "" {
-				return rep, "maestri_ask", nil
+		baseline := cleanTerminalText(readSnapshot(name))
+		if baseline == "" {
+			if fresh, _ := snapshotNow(cli, socket, name, 5*time.Second); fresh != "" {
+				baseline = fresh
 			}
-			// Bridge lento/ausente: ainda tenta digitar no Mac (entrega a mensagem)
-			_ = macOSFocusPasteAndReturn(text, name)
-			return "Mensagem enviada à sessão. A resposta completa pode demorar — toque ↻ ou veja no Mac.", "phone_bridge", nil
 		}
+
+		// Entrega a mensagem no Mac AGORA — não espera bridge.
+		_ = macOSFocusPasteAndReturn(text, name)
+
+		if qErr == nil {
+			// Loop único até 90s: reply do bridge OU delta do terminal.
+			if rep, delta := waitForReplyOrDelta(jobID, name, cli, socket, baseline, 90*time.Second); rep != "" {
+				clean := cleanTerminalText(rep)
+				_ = writeSnapshot(name, clean)
+				return clean, "maestri_ask", nil
+			} else if delta != "" {
+				return delta, "terminal_mirror", nil
+			}
+		} else if delta := waitForTerminalDelta(name, cli, socket, baseline, 90*time.Second); delta != "" {
+			// Outbox falhou: ainda tenta espelhar o que o inject mostrou.
+			return delta, "terminal_mirror", nil
+		}
+
+		return "Mensagem enviada à sessão. Resposta ainda não espelhada — toque ↻ ou veja no Mac.", "phone_bridge", nil
 	}
 
+	// Sem nome: fallback de inject direto.
 	if injErr := macOSFocusPasteAndReturn(text, name); injErr != nil {
 		return "", "local_inject", injErr
 	}
 	return "Mensagem digitada no Mac. A resposta aparece no Mac; o espelho no celular melhora com o bridge rcli-phone ativo.", "session_type", nil
+}
+
+// waitForReplyOrDelta espera até 90s por uma reply do bridge ou por um delta no terminal.
+func waitForReplyOrDelta(jobID, name, cli, socket, baseline string, timeout time.Duration) (reply, delta string) {
+	deadline := time.Now().Add(timeout)
+	replyPath := filepath.Join(repliesPath(), jobID+".txt")
+	last := baseline
+	for time.Now().Before(deadline) {
+		// Poll non-blocking no arquivo de reply.
+		if b, err := os.ReadFile(replyPath); err == nil {
+			_ = os.Remove(replyPath)
+			return strings.TrimSpace(string(b)), ""
+		}
+
+		// Espelho: snapshot ou check direto.
+		text := readSnapshot(name)
+		if text == "" || text == last {
+			if fresh, ok := snapshotNow(cli, socket, name, 4*time.Second); ok {
+				text = fresh
+			}
+		}
+		text = cleanTerminalText(text)
+		if text != "" && text != last && !isNoConnection(text) {
+			d := terminalDelta(baseline, text)
+			if d == "" {
+				d = text
+			}
+			return "", formatSnapshotReply(d)
+		}
+		if text != "" {
+			last = text
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}
+	return "", ""
+}
+
+// waitForTerminalDelta monitora snapshot/check até detectar mudança vs baseline.
+func waitForTerminalDelta(name, cli, socket, baseline string, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	last := baseline
+	for time.Now().Before(deadline) {
+		text := readSnapshot(name)
+		if text == "" || text == last {
+			if fresh, ok := snapshotNow(cli, socket, name, 4*time.Second); ok {
+				text = fresh
+			}
+		}
+		text = cleanTerminalText(text)
+		if text != "" && text != last && !isNoConnection(text) {
+			delta := terminalDelta(baseline, text)
+			if delta == "" {
+				delta = text
+			}
+			return formatSnapshotReply(delta)
+		}
+		if text != "" {
+			last = text
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return ""
 }
 
 func runMaestriAsk(cli, socket, agentName, text string, timeout time.Duration) (string, error) {
@@ -138,13 +221,18 @@ func runMaestriAsk(cli, socket, agentName, text string, timeout time.Duration) (
 	return out, err
 }
 
-func relayHome() string {
+// relayHomeFn pode ser sobrescrito em testes para isolar o diretório de trabalho.
+var relayHomeFn = defaultRelayHome
+
+func defaultRelayHome() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".", ".relay")
 	}
 	return filepath.Join(home, ".relay")
 }
+
+func relayHome() string { return relayHomeFn() }
 
 func outboxPath() string  { return filepath.Join(relayHome(), "outbox") }
 func repliesPath() string { return filepath.Join(relayHome(), "replies") }
@@ -239,6 +327,7 @@ end tell
 }
 
 // handleSessionOutput — snapshot da sessão (maestri check) para o celular.
+// Ordem: maestri check → snapshot → vazio. Sempre passa por cleanTerminalText.
 func (a *Agent) handleSessionOutput(w http.ResponseWriter, r *http.Request, sessionID string) {
 	sess, ok := a.registry.SessionByID(sessionID)
 	if !ok {
@@ -256,58 +345,50 @@ func (a *Agent) handleSessionOutput(w http.ResponseWriter, r *http.Request, sess
 	}
 	socket := strings.TrimSpace(sess.MaestriSocket)
 
-	// Preferência: check via bridge (consegue ler o orquestrador)
-	if text := checkViaBridge(cli, socket, name); text != "" {
-		writeJSON(w, http.StatusOK, map[string]any{"text": text, "source": "bridge_check", "name": name})
+	// 1) Tenta check direto.
+	if out, err := runMaestriCheck(cli, socket, name, 10*time.Second); err == nil {
+		clean := cleanTerminalText(out)
+		if isUsefulSnapshot(clean) {
+			_ = writeSnapshot(name, clean)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"text":       clean,
+				"source":     "maestri_check",
+				"name":       name,
+				"updated_at": snapshotTimestamp(name),
+			})
+			return
+		}
+	}
+
+	// 2) Fallback para snapshot gravado pelo bridge.
+	snap := cleanTerminalText(readSnapshot(name))
+	if isUsefulSnapshot(snap) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"text":       snap,
+			"source":     "snapshot",
+			"name":       name,
+			"updated_at": snapshotTimestamp(name),
+		})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, cli, "check", name)
-	env := os.Environ()
-	if socket != "" {
-		env = append(env, "MAESTRI_SOCKET="+socket)
-	}
-	cmd.Env = env
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	_ = cmd.Run()
-	text := strings.TrimSpace(stdout.String())
-	if text == "" {
-		text = strings.TrimSpace(stderr.String())
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"text": text, "source": "maestri_check", "name": name})
+	// 3) Nada disponível.
+	writeJSON(w, http.StatusOK, map[string]any{"text": "", "source": "none", "name": name})
 }
 
-func checkViaBridge(cli, socket, target string) string {
-	// rcli-phone faz check do target e grava em arquivo
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	outFile := filepath.Join(relayHome(), "last-check-"+sanitizeFile(target)+".txt")
-	_ = os.Remove(outFile)
-	// pede ao bridge para rodar check (via ask curto — se bridge for shell, --raw é melhor)
-	// Aqui só lemos last-check se o bridge já tiver preenchido.
-	b, err := os.ReadFile(outFile)
-	if err == nil {
-		return strings.TrimSpace(string(b))
-	}
-	_ = ctx
-	_ = cli
-	_ = socket
-	return ""
-}
-
-// ProcessOutboxOnce — rcli-phone: entrega e grava reply pra o celular ler.
+// ProcessOutboxOnce — tick da ponte rcli-phone.
+// A) entrega mensagens do celular nas sessões e grava replies.
+// B) atualiza snapshots dos alvos observados (watch-targets + jobs).
 func ProcessOutboxOnce() (processed int, err error) {
+	// --- A) Processa outbox -------------------------------------------------
 	dir := outboxPath()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			entries = nil
+		} else {
+			return 0, err
 		}
-		return 0, err
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -327,20 +408,36 @@ func ProcessOutboxOnce() (processed int, err error) {
 		if cli == "" {
 			cli = "maestri"
 		}
+		// Garante que o alvo está sendo espelhado.
+		_ = RegisterWatchTarget(job.Target, cli, job.Socket)
+
 		// Espera a resposta completa do agente (até 3 min) — é o “espelho” no celular
 		out, aerr := runMaestriAsk(cli, job.Socket, job.Target, job.Text, 3*time.Minute)
 		if aerr != nil {
+			// Mesmo sem reply, atualiza o snapshot do painel via check.
+			_, _ = snapshotNow(cli, job.Socket, job.Target, 8*time.Second)
+			// Não descarta imediatamente: deixa job se < 20min para retry.
 			meta, _ := os.Stat(path)
 			if meta != nil && time.Since(meta.ModTime()) > 20*time.Minute {
 				_ = os.Remove(path)
 			}
 			continue
 		}
+		clean := cleanTerminalText(out)
 		if job.ID != "" {
-			_ = writeReply(job.ID, out)
+			_ = writeReply(job.ID, clean)
 		}
+		// Atualiza snapshot do alvo com a resposta fresca.
+		_ = writeSnapshot(job.Target, clean)
 		_ = os.Remove(path)
 		processed++
 	}
+
+	// --- B) Espelho contínuo de todos os alvos observados -------------------
+	// Erros aqui não falham o tick — apenas logamos no stderr.
+	if serr := snapshotAllTargets(8 * time.Second); serr != nil {
+		fmt.Fprintf(os.Stderr, "snapshotAllTargets: %v\n", serr)
+	}
+
 	return processed, nil
 }

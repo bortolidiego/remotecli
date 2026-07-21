@@ -733,6 +733,47 @@ button:disabled {
   color: var(--text);
 }
 
+/* Terminal mirror panel (Maestri) */
+.terminal-panel {
+  margin: 4px 0 18px;
+  border-radius: var(--radius-sm);
+  background: #0f0f0e;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.terminal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #181816;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+
+.terminal-source {
+  color: var(--text-secondary);
+  text-transform: none;
+}
+
+.terminal-body {
+  margin: 0;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .tabs-row {
   display: flex;
   gap: 6px;
