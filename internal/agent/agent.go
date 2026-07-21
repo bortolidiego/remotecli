@@ -201,39 +201,52 @@ func loadOrCreateIdentity(store keychain.Store, sessionID string) (*crypto.Ident
 	return id, nil
 }
 
-// LoadOrCreateLocalToken carrega ou cria o segredo local administrativo da sessão.
+const localTokenAccount = "host"
+
+// LoadOrCreateLocalToken carrega ou cria o segredo local administrativo do host.
+// O token é úNICO por host, independente de sessionID (multi-CLI).
 func LoadOrCreateLocalToken(store keychain.Store, sessionID string) (string, error) {
 	if store == nil {
 		return "", errors.New("store obrigatório")
 	}
-	account := "host-" + sessionID
-	if token, err := LoadLocalToken(store, sessionID); err == nil {
+	// Tenta reutilizar token existente (canônico ou legado) antes de criar um novo.
+	if token, err := LoadLocalToken(store, sessionID); err == nil && token != "" {
+		// Migra para a conta canônica fixa se ainda não estiver nela.
+		_ = store.SaveSecret("relay-local-token", localTokenAccount, []byte(token))
 		return token, nil
 	}
 	token, err := generateLocalToken()
 	if err != nil {
 		return "", err
 	}
-	if err := store.SaveSecret("relay-local-token", account, []byte(token)); err != nil {
+	if err := store.SaveSecret("relay-local-token", localTokenAccount, []byte(token)); err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
 // LoadLocalToken retorna o segredo local administrativo já persistido.
+// Tenta na ordem: conta canônica "host", depois legado host-{sessionID}, depois host-default.
 func LoadLocalToken(store keychain.Store, sessionID string) (string, error) {
 	if store == nil {
 		return "", errors.New("store obrigatório")
 	}
-	b, err := store.LoadSecret("relay-local-token", "host-"+sessionID)
-	if err != nil {
-		return "", err
+	candidates := []string{
+		localTokenAccount,
+		"host-" + sessionID,
+		"host-default",
 	}
-	token := strings.TrimSpace(string(b))
-	if token == "" {
-		return "", errors.New("token local vazio")
+	for _, account := range candidates {
+		b, err := store.LoadSecret("relay-local-token", account)
+		if err != nil {
+			continue
+		}
+		token := strings.TrimSpace(string(b))
+		if token != "" {
+			return token, nil
+		}
 	}
-	return token, nil
+	return "", errors.New("token local não encontrado")
 }
 
 func generateLocalToken() (string, error) {

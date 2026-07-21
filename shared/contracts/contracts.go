@@ -52,6 +52,12 @@ type SessionMetadata struct {
 	PID               *int    `json:"pid,omitempty"`
 	WindowID          *string `json:"windowId,omitempty"`
 	Frontmost         bool    `json:"frontmost"`
+	Cwd               string  `json:"cwd,omitempty"`
+	Title             string  `json:"title,omitempty"`
+	SessionKey        string  `json:"session_key,omitempty"`
+	MaestriAgentName  string  `json:"maestri_agent_name,omitempty"`
+	MaestriSocket     string  `json:"maestri_socket,omitempty"`
+	MaestriCLI        string  `json:"maestri_cli,omitempty"`
 }
 
 // DeviceInfo descreve um dispositivo emparelhado.
@@ -78,6 +84,11 @@ type SessionDescriptor struct {
 	Frontmost         bool         `json:"frontmost"`
 	Status            Status       `json:"status"`
 	Capabilities      []Capability `json:"capabilities"`
+	Title             string       `json:"title,omitempty"`
+	LastSeenAt        time.Time    `json:"last_seen_at,omitempty"`
+	MaestriAgentName  string       `json:"maestri_agent_name,omitempty"`
+	MaestriSocket     string       `json:"maestri_socket,omitempty"`
+	MaestriCLI        string       `json:"maestri_cli,omitempty"`
 	// campos legados de compatibilidade com Marco 1
 	SessionID string       `json:"session_id"`
 	HostID    string       `json:"host_id"`

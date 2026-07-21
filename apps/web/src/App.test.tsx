@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import App from './App'
 
 describe('App', () => {
@@ -17,8 +17,8 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('Pairing-only')).toBeInTheDocument()
-    expect(screen.getByText('Emparelhar este dispositivo')).toBeInTheDocument()
+    expect(await screen.findByText('Emparelhar')).toBeInTheDocument()
+    expect(screen.getByText(/Escaneie o QR do Mac/)).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/health', expect.any(Object)))
     expect(fetchMock).not.toHaveBeenCalledWith('/api/status', expect.any(Object))
   })
@@ -28,11 +28,11 @@ describe('App', () => {
 
     render(<App />)
 
-    expect(await screen.findByText(/Agente local indisponível/)).toBeInTheDocument()
+    expect(await screen.findByText(/Mac offline/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Tentar novamente/ })).toBeInTheDocument()
   })
 
-  it('renderiza controles de sessão, janela e modal de aprovação', async () => {
+  it('lista sessões e abre chat ao tocar', async () => {
     vi.stubGlobal('indexedDB', {
       open: () => ({
         onupgradeneeded: null,
@@ -48,19 +48,22 @@ describe('App', () => {
         },
       }),
     } as unknown as IDBFactory)
-    localStorage.setItem('relay:pair-state', JSON.stringify({
-      deviceId: 'dev-web',
-      leaseToken: 'lease-token',
-      leaseExpiry: new Date(Date.now() + 60_000).toISOString(),
-      hostName: 'Mac Relay',
-      sessionId: 'sess-1',
-      hostId: 'host-1',
-    }))
-    // Evita que o polling de aprovações/eventos abra modal com resposta vazia.
+    localStorage.setItem(
+      'relay:pair-state',
+      JSON.stringify({
+        deviceId: 'dev-web',
+        leaseToken: 'lease-token',
+        leaseExpiry: new Date(Date.now() + 60_000).toISOString(),
+        hostName: 'Mac Relay',
+        sessionId: 'sess-1',
+        hostId: 'host-1',
+      }),
+    )
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const session = {
       id: 'host-1',
       harness: 'codex',
+      title: 'Codex principal',
       nativeSessionId: 'native-1',
       codexThreadId: 'thread-1',
       cwd: '/Users/diegobortoli/Desktop/apps/relay',
@@ -82,7 +85,7 @@ describe('App', () => {
       item_id: 'item-1',
       command: 'cat package.json',
       cwd: '/Users/diegobortoli/Desktop/apps/relay',
-      reason: 'Pré-visualizar um comando local antes de permitir execução única.',
+      reason: 'Pré-visualizar comando.',
       started_at_ms: Date.now(),
       created_at: new Date().toISOString(),
     }
@@ -92,7 +95,15 @@ describe('App', () => {
         return ok({ listening: true, address: '127.0.0.1:24109', version: 'relay-m2' })
       }
       if (url === '/api/status') {
-        return ok({ listening: true, address: '127.0.0.1:24109', version: 'relay-m2', session_id: 'sess-1', session_path: session.cwd, devices: [], sessions: [session] })
+        return ok({
+          listening: true,
+          address: '127.0.0.1:24109',
+          version: 'relay-m2',
+          session_id: 'sess-1',
+          session_path: session.cwd,
+          devices: [],
+          sessions: [session],
+        })
       }
       if (url === '/api/sessions') return ok([session])
       if (url.startsWith('/api/sessions/host-1')) {
@@ -105,22 +116,17 @@ describe('App', () => {
 
     render(<App />)
 
-    // Janela/Tela primeiro — qualquer CLI; chat só se houver Codex.
-    expect(await screen.findByText('Codex + tela')).toBeInTheDocument()
+    expect(await screen.findByText('Terminais')).toBeInTheDocument()
+    expect(await screen.findByText('Codex principal')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Codex principal'))
+
+    expect(await screen.findByRole('tab', { name: 'Chat' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Tela' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Colar' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Teclado' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Sair' })).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }))
     expect(screen.getByRole('button', { name: 'Enviar' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Parar' })).toBeEnabled()
-
     expect(screen.getByRole('dialog', { name: 'Aprovação pendente' })).toBeInTheDocument()
     expect(screen.getByText('cat package.json')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Permitir' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Negar' })).toBeInTheDocument()
+
     vi.useRealTimers()
   })
 })

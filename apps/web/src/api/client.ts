@@ -57,6 +57,24 @@ export async function startTurn(sessionId: string, text: string, auth: LeaseAuth
   return api(`/sessions/${encodeURIComponent(sessionId)}/turn`, { method: 'POST', body: JSON.stringify({ text }) }, auth)
 }
 
+export async function sendSessionMessage(
+  sessionId: string,
+  text: string,
+  auth: LeaseAuth | string,
+): Promise<{ status: string; mode: string; reply?: string; turn_id?: string }> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/message`, {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  }, auth)
+}
+
+export async function fetchSessionOutput(
+  sessionId: string,
+  auth: LeaseAuth | string,
+): Promise<{ text: string; source?: string; name?: string }> {
+  return api(`/sessions/${encodeURIComponent(sessionId)}/output`, {}, auth)
+}
+
 export async function interruptTurn(sessionId: string, auth: LeaseAuth | string): Promise<{ status: string }> {
   return api(`/sessions/${encodeURIComponent(sessionId)}/interrupt`, { method: 'POST' }, auth)
 }

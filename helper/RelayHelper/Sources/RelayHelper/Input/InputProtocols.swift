@@ -67,11 +67,15 @@ public final class SystemInputInjector: InputInjectorProtocol {
             CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)?.post(tap: .cghidEventTap)
         case "keyDown":
             if let key = event.key, let code = keyCode(for: key) {
-                CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
+                let ev = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)
+                ev?.flags = modifierFlags(from: event.modifiers)
+                ev?.post(tap: .cghidEventTap)
             }
         case "keyUp":
             if let key = event.key, let code = keyCode(for: key) {
-                CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+                let ev = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)
+                ev?.flags = modifierFlags(from: event.modifiers)
+                ev?.post(tap: .cghidEventTap)
             }
         default:
             break
@@ -143,6 +147,8 @@ private func modifierFlags(from: [String]?) -> CGEventFlags {
 private func keyCode(for key: String) -> CGKeyCode? {
     let map: [String: CGKeyCode] = [
         "return": 36,
+        "enter": 36,
+        "Enter": 36,
         "tab": 48,
         "space": 49,
         "escape": 53,
@@ -151,6 +157,8 @@ private func keyCode(for key: String) -> CGKeyCode? {
         "arrowDown": 125,
         "arrowLeft": 123,
         "arrowRight": 124,
+        "v": 9,
+        "V": 9,
     ]
     if let code = map[key] { return code }
     if key.count == 1, let scalar = key.unicodeScalars.first {

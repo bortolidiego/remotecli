@@ -115,6 +115,22 @@ func (a *Agent) handleSessionRoot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 		return
 	}
+	if sub == "message" {
+		if r.Method == http.MethodPost {
+			a.handleSessionMessage(w, r, sessionID)
+			return
+		}
+		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	if sub == "output" {
+		if r.Method == http.MethodGet {
+			a.handleSessionOutput(w, r, sessionID)
+			return
+		}
+		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
 
 	http.NotFound(w, r)
 }

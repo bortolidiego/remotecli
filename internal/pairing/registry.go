@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,6 +38,18 @@ type Lease struct {
 	ExpiresAt time.Time
 }
 
+// cliSession guarda metadados de uma CLI registrada via remotecli here.
+type cliSession struct {
+	Meta              contracts.SessionMetadata
+	Cwd               string
+	Title             string
+	LastSeenAt        time.Time
+	Status            contracts.Status
+	MaestriAgentName  string
+	MaestriSocket     string
+	MaestriCLI        string
+}
+
 // Registry gerencia dispositivos emparelhados, ofertas e leases.
 type Registry struct {
 	mu        sync.RWMutex
@@ -44,7 +59,6 @@ type Registry struct {
 	endpoint  string
 	sessionID string
 	basePath  string
-	meta      contracts.SessionMetadata
 
 	hostKey     []byte
 	hostECDH    []byte
@@ -54,9 +68,11 @@ type Registry struct {
 	devices map[string]contracts.DeviceInfo
 	nonces  map[string]NonceRecord
 
-	lease       Lease
-	leaseValid  bool
-	sessions    map[string]*DeviceSession // sessões em memória por device_id (não persistidas)
+	lease      Lease
+	leaseValid bool
+	sessions   map[string]*DeviceSession // sessões em memória por device_id (não persistidas)
+
+	cliSessions map[string]*cliSession // sessões de CLI por chave estável (SessionKey || NativeSessionID)
 }
 
 func NewRegistry(identity *crypto.IdentityPair, store keychain.Store, sessionID, hostName, endpoint, basePath string) (*Registry, error) {
@@ -69,18 +85,18 @@ func NewRegistry(identity *crypto.IdentityPair, store keychain.Store, sessionID,
 		return nil, err
 	}
 	r := &Registry{
-		identity:  identity,
-		store:     store,
-		hostName:  hostName,
-		endpoint:  endpoint,
-		sessionID: sessionID,
-		basePath:  basePath,
-		meta:      contracts.SessionMetadata{Harness: contracts.HarnessNative, NativeSessionID: sessionID},
-		hostKey:   pub,
-		hostECDH:  ecdhPub,
-		devices:   map[string]contracts.DeviceInfo{},
-		nonces:    map[string]NonceRecord{},
-		sessions:  map[string]*DeviceSession{},
+		identity:    identity,
+		store:       store,
+		hostName:    hostName,
+		endpoint:    endpoint,
+		sessionID:   sessionID,
+		basePath:    basePath,
+		hostKey:     pub,
+		hostECDH:    ecdhPub,
+		devices:     map[string]contracts.DeviceInfo{},
+		nonces:      map[string]NonceRecord{},
+		sessions:    map[string]*DeviceSession{},
+		cliSessions: map[string]*cliSession{},
 	}
 	if err := r.load(); err != nil {
 		return nil, fmt.Errorf("carregar registry: %w", err)
@@ -131,7 +147,59 @@ func (r *Registry) SetSessionMetadata(meta contracts.SessionMetadata) {
 	if meta.NativeSessionID == "" {
 		meta.NativeSessionID = r.sessionID
 	}
-	r.meta = meta
+	key := r.sessionKeyLocked(&meta)
+	cwd := meta.Cwd
+	if cwd == "" {
+		cwd = r.basePath
+	}
+	title := r.deriveTitleLocked(&meta, cwd)
+	now := time.Now()
+	s, ok := r.cliSessions[key]
+	if !ok {
+		s = &cliSession{Meta: meta}
+		r.cliSessions[key] = s
+	} else {
+		s.Meta = meta
+	}
+	s.Cwd = cwd
+	s.Title = title
+	s.LastSeenAt = now
+	s.Status = contracts.StatusActive
+	s.MaestriAgentName = meta.MaestriAgentName
+	s.MaestriSocket = meta.MaestriSocket
+	s.MaestriCLI = meta.MaestriCLI
+}
+
+func (r *Registry) sessionKeyLocked(meta *contracts.SessionMetadata) string {
+	if meta.SessionKey != "" {
+		return meta.SessionKey
+	}
+	if meta.NativeSessionID != "" {
+		return meta.NativeSessionID
+	}
+	return r.sessionID
+}
+
+func (r *Registry) deriveTitleLocked(meta *contracts.SessionMetadata, cwd string) string {
+	if meta.Title != "" {
+		return meta.Title
+	}
+	if meta.CodexThreadID != nil && *meta.CodexThreadID != "" {
+		return "Codex"
+	}
+	if meta.MaestriTerminalID != nil && *meta.MaestriTerminalID != "" {
+		return "Maestri:" + *meta.MaestriTerminalID
+	}
+	if cwd != "" && cwd != r.basePath {
+		base := filepath.Base(cwd)
+		if base != "" && base != "/" {
+			return base
+		}
+	}
+	if meta.NativeSessionID != "" && meta.NativeSessionID != r.sessionID {
+		return meta.NativeSessionID
+	}
+	return "Terminal"
 }
 
 func (r *Registry) HasDevices() bool {
@@ -152,6 +220,13 @@ func (r *Registry) StartOffer() (*contracts.ShareOfferPayload, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
+	// IP da LAN muda com Wi‑Fi/VPN — recalcula a cada QR.
+	hostport := strings.TrimPrefix(strings.TrimPrefix(r.endpoint, "https://"), "http://")
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil || port == "" {
+		port = "24109"
+	}
+	r.endpoint = LANEndpoint("0.0.0.0:" + port)
 	offer := &contracts.ShareOfferPayload{
 		SessionID: r.sessionID,
 		HostID:    r.HostID(),
@@ -334,25 +409,43 @@ func (r *Registry) Revoke(deviceID string) bool {
 func (r *Registry) Sessions() []contracts.SessionDescriptor {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return []contracts.SessionDescriptor{r.buildSessionDescriptorLocked()}
+	if len(r.cliSessions) == 0 {
+		// Fallback legado: retorna um descritor padrão do host para não quebrar clientes antigos.
+		return []contracts.SessionDescriptor{r.buildHostDescriptorLocked()}
+	}
+	out := make([]contracts.SessionDescriptor, 0, len(r.cliSessions))
+	for key, s := range r.cliSessions {
+		out = append(out, r.buildSessionDescriptorLocked(key, s))
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Frontmost != out[j].Frontmost {
+			return out[i].Frontmost
+		}
+		return out[i].LastSeenAt.After(out[j].LastSeenAt)
+	})
+	return out
 }
 
 func (r *Registry) SessionByID(id string) (contracts.SessionDescriptor, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	sess := r.buildSessionDescriptorLocked()
-	if sess.ID != id && sess.SessionID != id {
-		return contracts.SessionDescriptor{}, false
+	if s, ok := r.cliSessions[id]; ok {
+		return r.buildSessionDescriptorLocked(id, s), true
 	}
-	return sess, true
+	// Fallback legado para compatibilidade com clientes que usam HostID/SessionID antigo.
+	host := r.buildHostDescriptorLocked()
+	if host.ID == id || host.SessionID == id {
+		return host, true
+	}
+	return contracts.SessionDescriptor{}, false
 }
 
-func (r *Registry) buildSessionDescriptorLocked() contracts.SessionDescriptor {
+func (r *Registry) buildSessionDescriptorLocked(key string, s *cliSession) contracts.SessionDescriptor {
 	caps := []contracts.Capability{}
 	if r.identity != nil && r.identity.ECDHKey() != nil {
 		caps = append(caps, contracts.CapabilityNativeControl)
 	}
-	meta := r.meta
+	meta := s.Meta
 	if meta.Harness == "" {
 		meta.Harness = contracts.HarnessNative
 	}
@@ -360,23 +453,54 @@ func (r *Registry) buildSessionDescriptorLocked() contracts.SessionDescriptor {
 		meta.NativeSessionID = r.sessionID
 	}
 	return contracts.SessionDescriptor{
-		ID:                r.HostID(),
-		SessionID:         r.sessionID,
+		ID:                key,
+		SessionID:         key,
 		HostID:            r.HostID(),
 		Harness:           meta.Harness,
 		NativeSessionID:   meta.NativeSessionID,
 		MaestriTerminalID: meta.MaestriTerminalID,
 		CodexThreadID:     meta.CodexThreadID,
-		Cwd:               r.basePath,
+		Cwd:               s.Cwd,
 		PID:               meta.PID,
 		WindowID:          meta.WindowID,
 		Frontmost:         meta.Frontmost,
-		Status:            contracts.StatusActive,
+		Status:            s.Status,
 		Capabilities:      caps,
-		CreatedAt:         time.Now().Add(-time.Minute),
-		ExpiresAt:         time.Now().Add(24 * time.Hour),
+		Title:             s.Title,
+		LastSeenAt:        s.LastSeenAt,
+		MaestriAgentName:  s.MaestriAgentName,
+		MaestriSocket:     s.MaestriSocket,
+		MaestriCLI:        s.MaestriCLI,
+		CreatedAt:         s.LastSeenAt.Add(-time.Minute),
+		ExpiresAt:         s.LastSeenAt.Add(24 * time.Hour),
 		Devices:           r.devicesLocked(),
 	}
+}
+
+func (r *Registry) buildHostDescriptorLocked() contracts.SessionDescriptor {
+	return contracts.SessionDescriptor{
+		ID:           r.HostID(),
+		SessionID:    r.sessionID,
+		HostID:       r.HostID(),
+		Harness:      contracts.HarnessNative,
+		NativeSessionID: r.sessionID,
+		Cwd:          r.basePath,
+		Status:       contracts.StatusActive,
+		Capabilities: r.hostCapabilitiesLocked(),
+		Title:        "Terminal",
+		LastSeenAt:   time.Now(),
+		CreatedAt:    time.Now().Add(-time.Minute),
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		Devices:      r.devicesLocked(),
+	}
+}
+
+func (r *Registry) hostCapabilitiesLocked() []contracts.Capability {
+	caps := []contracts.Capability{}
+	if r.identity != nil && r.identity.ECDHKey() != nil {
+		caps = append(caps, contracts.CapabilityNativeControl)
+	}
+	return caps
 }
 
 func (r *Registry) devicesLocked() []contracts.DeviceInfo {
@@ -438,6 +562,14 @@ func (r *Registry) cleanupLoop() {
 			for k, v := range r.nonces {
 				if time.Now().After(v.ExpiresAt) {
 					delete(r.nonces, k)
+				}
+			}
+			const sessionTTL = 2 * time.Hour
+			for k, s := range r.cliSessions {
+				if time.Since(s.LastSeenAt) > sessionTTL {
+					delete(r.cliSessions, k)
+				} else if time.Since(s.LastSeenAt) > 5*time.Minute && s.Status == contracts.StatusActive {
+					s.Status = contracts.StatusOffline
 				}
 			}
 			r.mu.Unlock()

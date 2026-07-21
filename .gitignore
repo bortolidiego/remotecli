@@ -1,36 +1,65 @@
-# Binários
+# --- Binários locais ---
+/remotecli
 /relay
+/rcli-bridge
 *.exe
 *.dll
 *.so
 *.dylib
-
-# Go
 *.test
-vendor/
 
-# Node
+# --- Go ---
+vendor/
+bin/
+# dist de build na raiz (se existir). NÃO ignorar internal/web/dist (go:embed da PWA).
+/dist/
+
+# --- Node / frontend ---
 node_modules/
 apps/web/dist/
-*.log
 npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Swift
+# --- Swift / Xcode ---
 .build/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+DerivedData/
 
-# IDE
-.DS_Store
-.idea/
-.vscode/
-*.swp
-
-# Secrets locais
-*.pem
-*.key
+# --- Segredos e dados locais (NUNCA commitar) ---
 .env
 .env.*
-relay
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.relay/
+**/.relay/
+
+# QR e artefatos de pareamento gerados na máquina
 relay-pair-*.png
+*.qr.png
+
+# --- Logs e temporários ---
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# --- IDE ---
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Cobertura / caches ---
+coverage/
+.coverage
+*.out
+.cache/
+.pytest_cache/
+.ruff_cache/

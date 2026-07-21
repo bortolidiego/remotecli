@@ -12,6 +12,8 @@ import {
   interruptTurn,
   pair,
   releaseLease,
+  fetchSessionOutput,
+  sendSessionMessage,
   startTurn,
   type LeaseAuth,
   type PairState,
@@ -21,19 +23,22 @@ import { SignalingClient, type ConnectionState } from './webrtc/signaling'
 
 const STORED_PAIR = 'relay:pair-state'
 
+type View = 'list' | 'session'
+
 export default function App() {
   const [health, setHealth] = useState<AgentStatus | null>(null)
   const [pairState, setPairState] = useState<PairState | null>(() => readPairState())
   const [, setStatus] = useState<AuthenticatedStatus | null>(null)
   const [sessions, setSessions] = useState<SessionDescriptor[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [view, setView] = useState<View>('list')
   const [detail, setDetail] = useState<SessionDescriptor | null>(null)
   const [offer, setOffer] = useState('')
-  const [deviceName, setDeviceName] = useState('Web PWA')
+  const [deviceName, setDeviceName] = useState('iPhone')
   const [message, setMessage] = useState<string | null>(null)
   const [offline, setOffline] = useState(false)
   const [, setApprovals] = useState<CodexApproval[]>([])
-  const [, setEvents] = useState<CodexEvent[]>([])
+  const [events, setEvents] = useState<CodexEvent[]>([])
   const [selectedApproval, setSelectedApproval] = useState<CodexApproval | null>(null)
   const [busy, setBusy] = useState(false)
   const [rtcState, setRtcState] = useState<ConnectionState>('idle')
@@ -42,12 +47,15 @@ export default function App() {
   const [target, setTarget] = useState<'window' | 'display'>('display')
   const [fullScreen, setFullScreen] = useState(false)
   const [promptText, setPromptText] = useState('')
+  const [localLog, setLocalLog] = useState<{ id: string; role: 'user' | 'assistant'; text: string }[]>([])
   const [scannedOffer, setScannedOffer] = useState('')
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
   const signalingRef = useRef<SignalingClient | null>(null)
-  const auth = useMemo<LeaseAuth | null>(() => pairState && ({ deviceId: pairState.deviceId, leaseToken: pairState.leaseToken }), [pairState])
+  const auth = useMemo<LeaseAuth | null>(
+    () => (pairState ? { deviceId: pairState.deviceId, leaseToken: pairState.leaseToken } : null),
+    [pairState],
+  )
 
-  // Carrega oferta via QR: ?c=código curto (preferido) ou ?offer=envelope completo.
   useEffect(() => {
     if (pairState) return
     const params = new URLSearchParams(window.location.search)
@@ -60,7 +68,7 @@ export default function App() {
             headers: { Accept: 'application/json' },
           })
           if (!res.ok) {
-            setMessage(`QR inválido ou expirado (${res.status}). Rode relay share de novo.`)
+            setMessage(`QR inválido ou expirado (${res.status}). Rode remotecli relay de novo.`)
             return
           }
           const text = await res.text()
@@ -76,11 +84,10 @@ export default function App() {
     if (offerParam) {
       setOffer(offerParam)
       setScannedOffer(offerParam)
-      setMessage('Oferta detectada no QR. Confirme o pareamento abaixo.')
+      setMessage('Oferta detectada no QR. Confirme o pareamento.')
     }
   }, [pairState])
 
-  // Polling Codex só quando a sessão tem thread (evita 400 em modo "qualquer CLI").
   useEffect(() => {
     if (!auth || !selectedId || !detail?.codexThreadId) return
     const sessionId = selectedId
@@ -115,50 +122,36 @@ export default function App() {
     }
   }, [auth, selectedId, detail?.codexThreadId])
 
-
-
-  async function sendTurn() {
-    if (!auth || !selectedId || !promptText.trim() || busy) return
-    setBusy(true)
-    setMessage(null)
-    try {
-      await startTurn(selectedId, promptText.trim(), auth)
-      setPromptText('')
-      void refreshPrivate()
-    } catch (err) {
-      setMessage(String(err))
-    } finally {
-      setBusy(false)
+  useEffect(() => {
+    if (!auth) return
+    const currentAuth = auth
+    let active = true
+    async function tick() {
+      try {
+        const nextSessions = await fetchSessions(currentAuth)
+        if (!active) return
+        setSessions(nextSessions)
+        setSelectedId((current) => {
+          if (!current) return null
+          const still = nextSessions.find((s) => s.id === current)
+          if (!still) {
+            setView('list')
+            setDetail(null)
+            return null
+          }
+          return current
+        })
+      } catch (err) {
+        if (active) setMessage(String(err))
+      }
     }
-  }
-
-  async function interruptCurrentTurn() {
-    if (!auth || !selectedId || busy) return
-    setBusy(true)
-    setMessage(null)
-    try {
-      await interruptTurn(selectedId, auth)
-      void refreshPrivate()
-    } catch (err) {
-      setMessage(String(err))
-    } finally {
-      setBusy(false)
+    void tick()
+    const id = setInterval(tick, 3000)
+    return () => {
+      active = false
+      clearInterval(id)
     }
-  }
-
-  async function submitDecision(approval: CodexApproval, decision: 'accept' | 'deny') {
-    if (!auth || !selectedId) return
-    setMessage(null)
-    try {
-      await decideApproval(selectedId, approval.id, decision, auth)
-      setSelectedApproval(null)
-      const next = await fetchApprovals(selectedId, auth)
-      setApprovals(next)
-      setSelectedApproval(next[0] ?? null)
-    } catch (err) {
-      setMessage(String(err))
-    }
-  }
+  }, [auth])
 
   useEffect(() => {
     void refreshPublic()
@@ -170,13 +163,15 @@ export default function App() {
   }, [auth])
 
   useEffect(() => {
-    if (!auth || !selectedId) return
+    if (!auth || !selectedId) {
+      setDetail(null)
+      return
+    }
     fetchSessionDetail(selectedId, auth)
       .then(setDetail)
       .catch((err) => setMessage(String(err)))
   }, [auth, selectedId])
 
-  // Inicia WebRTC quando o par está autenticado.
   useEffect(() => {
     if (!auth || !pairState) return
     const state = pairState
@@ -195,11 +190,11 @@ export default function App() {
         deviceId: state.deviceId,
         onRemoteTrack: (track) => {
           if (!active) return
-          const stream = remoteStream ?? new MediaStream()
-          if (!stream.getTracks().includes(track)) {
-            stream.addTrack(track)
-          }
-          setRemoteStream(stream)
+          setRemoteStream((prev) => {
+            const stream = prev ?? new MediaStream()
+            if (!stream.getTracks().includes(track)) stream.addTrack(track)
+            return stream
+          })
         },
         onDataChannelOpen: () => {
           if (!active) return
@@ -226,21 +221,125 @@ export default function App() {
         if (active) setMessage(`WebRTC: ${err}`)
       }
     }
-    start()
+    void start()
     return () => {
       active = false
       client?.close().catch(() => {})
       signalingRef.current = null
     }
-  }, [auth, pairState, remoteStream])
+  }, [auth, pairState])
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (video && remoteStream) {
-      video.srcObject = remoteStream
-      video.play().catch(() => {})
+  async function sendTurn() {
+    if (!auth || !selectedId || !promptText.trim() || busy) return
+    const text = promptText.trim()
+    setBusy(true)
+    setMessage(null)
+    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text }])
+    setPromptText('')
+    try {
+      await startTurn(selectedId, text, auth)
+    } catch (err) {
+      setMessage(String(err))
+    } finally {
+      setBusy(false)
     }
-  }, [remoteStream])
+  }
+
+  /** Envia e espera resposta real da sessão (ida e volta, tipo Claude). */
+  async function sendToSession() {
+    if (!auth || !selectedId || !promptText.trim() || busy) return
+    const text = promptText.trim()
+    setBusy(true)
+    setMessage(null)
+    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text }])
+    setPromptText('')
+    setLocalLog((log) => [
+      ...log,
+      { id: `a-${Date.now()}-wait`, role: 'assistant', text: 'Enviado. Aguardando resposta da sessão…' },
+    ])
+    try {
+      // Pode demorar: no orquestrador o bridge espera o agente responder (até ~90s)
+      const res = await sendSessionMessage(selectedId, text, auth)
+      const reply = (res.reply || '').trim()
+      const isStatusOnly =
+        !reply ||
+        reply.startsWith('Mensagem enviada') ||
+        reply.startsWith('Mensagem a caminho') ||
+        reply.startsWith('Mensagem digitada')
+
+      setLocalLog((log) => {
+        const base = log.filter((m) => !m.id.endsWith('-wait'))
+        if (!isStatusOnly) {
+          return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: reply }]
+        }
+        // Sem texto de resposta ainda — tenta espelhar o terminal
+        return base
+      })
+
+      if (isStatusOnly) {
+        // poll output por um tempo
+        const before = await fetchSessionOutput(selectedId, auth).then((s) => s.text || '').catch(() => '')
+        const deadline = Date.now() + 60_000
+        let last = before
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 3000))
+          const snap = await fetchSessionOutput(selectedId, auth).catch(() => null)
+          const now = snap?.text || ''
+          if (now && now !== last && now.length > last.length + 10) {
+            let delta = now
+            if (last && now.startsWith(last)) delta = now.slice(last.length)
+            delta = delta.trim()
+            if (delta.length > 15 && !delta.includes('No connection')) {
+              setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: delta.slice(0, 4000) }])
+              return
+            }
+          }
+          last = now || last
+        }
+        setLocalLog((log) => [
+          ...log,
+          {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            text: reply || 'Resposta ainda não espelhada no celular. Veja o Mac — a mensagem já entrou na sessão.',
+          },
+        ])
+      }
+    } catch (err) {
+      setMessage(String(err))
+      setLocalLog((log) => {
+        const base = log.filter((m) => !m.id.endsWith('-wait'))
+        return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: `Falha: ${String(err)}` }]
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function interruptCurrentTurn() {
+    if (!auth || !selectedId || busy) return
+    setBusy(true)
+    try {
+      await interruptTurn(selectedId, auth)
+    } catch (err) {
+      setMessage(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitDecision(approval: CodexApproval, decision: 'accept' | 'deny') {
+    if (!auth || !selectedId) return
+    try {
+      await decideApproval(selectedId, approval.id, decision, auth)
+      setSelectedApproval(null)
+      const next = await fetchApprovals(selectedId, auth)
+      setApprovals(next)
+      setSelectedApproval(next[0] ?? null)
+    } catch (err) {
+      setMessage(String(err))
+    }
+  }
 
   async function refreshPublic() {
     try {
@@ -262,7 +361,6 @@ export default function App() {
       ])
       setStatus(nextStatus)
       setSessions(nextSessions)
-      setSelectedId((current) => current ?? nextSessions[0]?.id ?? null)
       setOffline(false)
       setMessage(null)
     } catch (err) {
@@ -272,27 +370,25 @@ export default function App() {
   }
 
   async function submitPair() {
-    setMessage('Validando oferta e gerando chaves locais...')
+    setMessage('Validando oferta e gerando chaves…')
     try {
       const next = await pair(offer, deviceName)
       localStorage.setItem(STORED_PAIR, JSON.stringify(next))
       setPairState(next)
       setOffer('')
-      setMessage('Pareamento concluído com lease ativo.')
+      setMessage(null)
+      setView('list')
     } catch (err) {
       setMessage(String(err))
     }
   }
 
   async function releaseCurrentLease() {
-    // Sempre limpa o celular — mesmo se o Mac já reiniciou / lease expirou (401).
     const previous = auth
     try {
-      if (previous) {
-        await releaseLease(previous)
-      }
+      if (previous) await releaseLease(previous)
     } catch {
-      // ignorar erro de rede/lease morto
+      /* lease morto */
     }
     try {
       signalingRef.current?.close().catch(() => {})
@@ -306,22 +402,44 @@ export default function App() {
     setSessions([])
     setDetail(null)
     setSelectedId(null)
+    setView('list')
     setRemoteStream(null)
     setDataChannelOpen(false)
     setRtcState('idle')
     setSelectedApproval(null)
-    setMessage('Desconectado. Emparelhe de novo com um QR atualizado.')
+    setLocalLog([])
+    setMessage('Desconectado. Escaneie um QR novo no Mac.')
+  }
+
+  function openSession(session: SessionDescriptor) {
+    setSelectedId(session.id)
+    setView('session')
+    setTab('digitar')
+    setPromptText('')
+    setLocalLog([])
+    setEvents([])
+    setMessage(null)
+  }
+
+  function backToList() {
+    setView('list')
+    setSelectedId(null)
+    setDetail(null)
+    setLocalLog([])
+    setPromptText('')
   }
 
   if (offline) {
     return (
       <Shell>
-        <section className="panel center">
-          <div className="status-dot offline" />
-          <h1>Relay</h1>
-          <p>Agente local indisponível. A PWA segue instalada e pronta para reconectar quando o Mac voltar.</p>
-          <button onClick={refreshPublic}>Tentar novamente</button>
-        </section>
+        <div className="center-screen">
+          <span className="status-dot offline" />
+          <h1>Mac offline</h1>
+          <p>O agente local não responde. No Mac rode <code>remotecli relay</code> e tente de novo.</p>
+          <button className="primary-btn" type="button" onClick={() => void refreshPublic()}>
+            Tentar novamente
+          </button>
+        </div>
       </Shell>
     )
   }
@@ -329,274 +447,355 @@ export default function App() {
   if (!pairState) {
     return (
       <Shell>
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">Pairing-only</p>
-            <h1>Relay</h1>
-          </div>
-          <span className="status-pill">{health?.listening ? 'Agente online' : 'Aguardando'}</span>
+        <header className="app-header bordered">
+          <div style={{ width: 40 }} />
+          <h1>
+            Remote CliControl
+            <span className="subtitle">{health?.listening ? 'Mac online' : 'Aguardando Mac'}</span>
+          </h1>
+          <div style={{ width: 40 }} />
         </header>
-        <section className="panel">
-          <h2>Emparelhar este dispositivo</h2>
-          <p className="muted">Cole o envelope assinado gerado pelo CLI ou escaneie o QR do Mac. Antes do pareamento, nenhuma sessão, cwd, device ou metadado é consultado.</p>
-          <label>
-            Nome do dispositivo
-            <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
+        <div className="center-screen">
+          <h1>Emparelhar</h1>
+          <p>Escaneie o QR do Mac (mesma Wi‑Fi). Nada privado é lido antes do pareamento.</p>
+          <label className="field">
+            Nome deste iPhone
+            <input value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
           </label>
-          <label>
-            Envelope ou payload QR
-            <textarea value={offer} onChange={(event) => setOffer(event.target.value)} rows={8} />
+          <label className="field">
+            Oferta do QR
+            <textarea value={offer} onChange={(e) => setOffer(e.target.value)} rows={6} />
           </label>
-          <button onClick={submitPair} disabled={!offer.trim() || !deviceName.trim()}>
-            {scannedOffer ? 'Parear via QR' : 'Parear com WebCrypto'}
+          <button
+            className="primary-btn"
+            type="button"
+            disabled={!offer.trim() || !deviceName.trim()}
+            onClick={() => void submitPair()}
+          >
+            {scannedOffer ? 'Parear via QR' : 'Parear'}
           </button>
           {message && <p className="notice">{message}</p>}
-        </section>
+        </div>
       </Shell>
     )
   }
 
+  if (view === 'list') {
+    return (
+      <Shell>
+        <header className="app-header">
+          <button className="icon-btn ghost" type="button" onClick={() => void releaseCurrentLease()} aria-label="Menu">
+            ☰
+          </button>
+          <h1>
+            Terminais
+            <span className="subtitle">Seu Mac · até {formatTime(pairState.leaseExpiry)}</span>
+          </h1>
+          <button className="icon-btn" type="button" onClick={() => void refreshPrivate()} aria-label="Atualizar">
+            ↻
+          </button>
+        </header>
+
+        <div className="screen">
+          <div className="screen-body">
+            <div className="sessions-toolbar">
+              <strong>Sessões</strong>
+              <span className="filter-chip">Todas ▾</span>
+            </div>
+
+            {sessions.length === 0 ? (
+              <div className="empty-state">
+                <h2>Nenhum terminal</h2>
+                <p>
+                  No Mac, em cada terminal que quiser controlar, rode:
+                  <br />
+                  <code>remotecli here</code>
+                </p>
+              </div>
+            ) : (
+              <div className="session-cards" aria-label="Sessões">
+                {sessions.map((session) => (
+                  <button
+                    key={session.id}
+                    type="button"
+                    className="session-card"
+                    onClick={() => openSession(session)}
+                  >
+                    <div className="session-card-top">
+                      <div className={`session-avatar ${session.harness}`}>{avatarLetter(session)}</div>
+                      <div className="session-card-meta">
+                        <p className="session-card-title">{sessionTitle(session)}</p>
+                        <div className="session-card-status">
+                          <span className="dot" />
+                          Conectado · {harnessLabel(session)}
+                        </div>
+                      </div>
+                    </div>
+                    <p className="session-card-preview">
+                      {session.codexThreadId
+                        ? 'Toque para conversar com o Codex deste terminal.'
+                        : 'Toque para digitar e enviar comandos ao Mac.'}
+                    </p>
+                    <p className="session-card-path">{shortCwd(session.cwd)}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+            {message && <p className="notice" style={{ marginTop: 16 }}>{message}</p>}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="fab"
+          onClick={() =>
+            setMessage('No Mac: abra um terminal e rode remotecli here para aparecer aqui.')
+          }
+        >
+          + Novo terminal
+        </button>
+      </Shell>
+    )
+  }
+
+  // Session detail view
+  const session = detail
+  const hasCodex = Boolean(session?.codexThreadId)
+  const isMaestri = Boolean(session?.harness === 'maestri' || session?.maestri_agent_name)
+  const linkLabel = rtcStateLabel(rtcState, dataChannelOpen)
+
   return (
     <Shell>
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Remote CliControl</p>
-          <h1>Seu Mac</h1>
-        </div>
-        <button className="icon-button" onClick={() => void refreshPrivate()} aria-label="Atualizar">↻</button>
+      <header className="app-header bordered">
+        <button className="icon-btn" type="button" onClick={backToList} aria-label="Voltar">
+          ←
+        </button>
+        <h1>
+          {session ? sessionTitle(session) : 'Sessão'}
+          <span className="subtitle">
+            {session ? harnessLabel(session) : '…'} · {linkLabel}
+          </span>
+        </h1>
+        <button className="icon-btn" type="button" onClick={() => void refreshPrivate()} aria-label="Atualizar">
+          ↻
+        </button>
       </header>
 
-      <section className="panel compact">
-        <div className="lease-row">
-          <div>
-            <strong>Conectado</strong>
-            <span>Até {formatTime(pairState.leaseExpiry)}</span>
-          </div>
-          <button className="secondary" onClick={releaseCurrentLease}>Desconectar</button>
-        </div>
-      </section>
+      <div className="tabs-row" role="tablist" aria-label="Modo">
+        <button
+          type="button"
+          className={`tab-pill ${tab === 'digitar' ? 'active' : ''}`}
+          role="tab"
+          aria-selected={tab === 'digitar'}
+          onClick={() => setTab('digitar')}
+        >
+          {hasCodex ? 'Chat' : 'Digitar'}
+        </button>
+        <button
+          type="button"
+          className={`tab-pill ${tab === 'tela' ? 'active' : ''}`}
+          role="tab"
+          aria-selected={tab === 'tela'}
+          onClick={() => setTab('tela')}
+        >
+          Tela
+        </button>
+      </div>
 
-      {sessions.length > 1 && (
-        <section className="session-list" aria-label="Sessões">
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              className={`session-row ${selectedId === session.id ? 'selected' : ''}`}
-              onClick={() => setSelectedId(session.id)}
-            >
-              <strong>{session.nativeSessionId || 'Mac'}</strong>
-              <small>{session.codexThreadId ? 'com chat' : 'tela'}</small>
-            </button>
-          ))}
-        </section>
+      {tab === 'digitar' ? (
+        <div className="screen">
+          <div className="chat-scroll">
+            <div className="chat-intro">
+              {hasCodex ? (
+                <>
+                  Converse com o Codex deste terminal. As mensagens vão para a thread no Mac.
+                  <p className="muted">Pasta: {shortCwd(session?.cwd)}</p>
+                </>
+              ) : isMaestri ? (
+                <>
+                  Como no app Claude: digite aqui e a mensagem entra na sessão{' '}
+                  <strong>{session?.maestri_agent_name || sessionTitle(session!)}</strong>. No Mac a conversa continua de onde parou.
+                  <p className="muted">Pasta: {shortCwd(session?.cwd)}</p>
+                </>
+              ) : (
+                <>
+                  Digite e envie — a mensagem vai para esta sessão no Mac (como se você tivesse digitado).
+                  <p className="muted">
+                    Canal: {linkLabel}. Pasta: {shortCwd(session?.cwd)}
+                  </p>
+                </>
+              )}
+            </div>
+
+            {localLog.map((msg) => (
+              <div key={msg.id} className={`msg-row ${msg.role}`}>
+                <div className="msg-bubble">{msg.text}</div>
+              </div>
+            ))}
+
+            {hasCodex && events.length > 0 && (
+              <div className="event-feed">
+                {events.slice(-8).map((ev) => (
+                  <div key={ev.id} className="event-item">
+                    <strong>{ev.kind}</strong>
+                    {ev.text || ev.status || ''}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="composer-wrap">
+            <div className="composer">
+              <textarea
+                value={promptText}
+                onChange={(e) => setPromptText(e.target.value)}
+                placeholder={
+                  hasCodex
+                    ? 'Mensagem para o Codex…'
+                    : isMaestri
+                      ? 'Mensagem para a sessão Maestri…'
+                      : 'Comando ou texto para o Mac…'
+                }
+                rows={1}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    if (hasCodex) void sendTurn()
+                    else void sendToSession()
+                  }
+                }}
+              />
+              <div className="composer-actions">
+                {hasCodex && (
+                  <button
+                    type="button"
+                    className="composer-chip"
+                    onClick={() => void interruptCurrentTurn()}
+                    disabled={busy}
+                    aria-label="Parar"
+                    title="Parar"
+                  >
+                    ■
+                  </button>
+                )}
+                <span className="spacer" />
+                <button
+                  type="button"
+                  className="send-btn"
+                  disabled={busy || !promptText.trim()}
+                  onClick={() => {
+                    if (hasCodex) void sendTurn()
+                    else void sendToSession()
+                  }}
+                  aria-label="Enviar"
+                >
+                  ↑
+                </button>
+              </div>
+            </div>
+            {busy && <p className="composer-hint">Enviando para a sessão…</p>}
+            {message && <p className="notice" style={{ marginTop: 8 }}>{message}</p>}
+          </div>
+        </div>
+      ) : (
+        <div className="screen">
+          <div className="screen-body screen-panel">
+            <div className={`video-stage ${fullScreen ? 'fullscreen' : ''}`}>
+              <video
+                muted
+                playsInline
+                autoPlay
+                className="relay-video"
+                ref={(el) => {
+                  if (el && remoteStream) {
+                    el.srcObject = remoteStream
+                    el.play().catch(() => {})
+                  }
+                }}
+              />
+              {!remoteStream && (
+                <p className="video-placeholder">
+                  {dataChannelOpen
+                    ? 'Canal aberto. Vídeo da tela ainda em construção.'
+                    : 'Conectando ao Mac…'}
+                </p>
+              )}
+            </div>
+            <div className="screen-tools">
+              <button
+                type="button"
+                className={`pill-btn ${target === 'display' ? 'active' : ''}`}
+                onClick={() => setTarget('display')}
+              >
+                Tela cheia
+              </button>
+              <button
+                type="button"
+                className={`pill-btn ${target === 'window' ? 'active' : ''}`}
+                onClick={() => setTarget('window')}
+              >
+                Janela
+              </button>
+              <button type="button" className="pill-btn" onClick={() => setFullScreen((v) => !v)}>
+                {fullScreen ? 'Sair' : 'Expandir'}
+              </button>
+              <button type="button" className="pill-btn danger" onClick={() => void releaseCurrentLease()}>
+                Desconectar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {detail && (
-        <SessionDetail
-          session={detail}
-          rtcState={rtcState}
-          dataChannelOpen={dataChannelOpen}
-          remoteStream={remoteStream}
-          target={target}
-          fullScreen={fullScreen}
-          onTargetChange={setTarget}
-          onToggleFullScreen={() => setFullScreen((v) => !v)}
-          onSendInput={(event) => signalingRef.current?.sendInput(event).catch((err) => setMessage(String(err)))}
-          onSendClipboard={(text) => signalingRef.current?.sendClipboard(text).catch((err) => setMessage(String(err)))}
-          onCopyCwd={() => void navigator.clipboard?.writeText(detail.cwd)}
-          onReleaseControl={releaseCurrentLease}
-          onSendTurn={sendTurn}
-          onInterruptTurn={interruptCurrentTurn}
-          busy={busy}
-          promptText={promptText}
-          onPromptChange={setPromptText}
+      {selectedApproval && hasCodex && (
+        <ApprovalModal
+          approval={selectedApproval}
+          onDecide={submitDecision}
+          onClose={() => setSelectedApproval(null)}
         />
       )}
-      {selectedApproval && detail?.codexThreadId && (
-        <ApprovalModal approval={selectedApproval} onDecide={submitDecision} onClose={() => setSelectedApproval(null)} />
-      )}
-      {message && <p className="notice">{message}</p>}
     </Shell>
   )
 }
 
-function SessionDetail({
-  session,
-  rtcState,
-  dataChannelOpen,
-  remoteStream,
-  target,
-  fullScreen,
-  onTargetChange,
-  onToggleFullScreen,
-  onSendInput,
-  onSendClipboard,
-  onCopyCwd,
-  onReleaseControl,
-  onSendTurn,
-  onInterruptTurn,
-  busy,
-  promptText,
-  onPromptChange,
+function ApprovalModal({
+  approval,
+  onDecide,
+  onClose,
 }: {
-  session: SessionDescriptor
-  rtcState: ConnectionState
-  dataChannelOpen: boolean
-  remoteStream: MediaStream | null
-  target: 'window' | 'display'
-  fullScreen: boolean
-  onTargetChange: (t: 'window' | 'display') => void
-  onToggleFullScreen: () => void
-  onSendInput: (event: object) => void
-  onSendClipboard: (text: string) => void
-  onCopyCwd: () => void
-  onReleaseControl: () => void
-  onSendTurn: () => void
-  onInterruptTurn: () => void
-  busy: boolean
-  promptText: string
-  onPromptChange: (text: string) => void
+  approval: CodexApproval
+  onDecide: (a: CodexApproval, decision: 'accept' | 'deny') => void
+  onClose: () => void
 }) {
-  // Janela primeiro: funciona com qualquer CLI (Codex, Grok, terminal…).
-  const [tab, setTab] = useState<'janela' | 'chat'>('janela')
-  const [clipboardText, setClipboardText] = useState('')
-  const [showDetails, setShowDetails] = useState(false)
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const hasCodex = Boolean(session.codexThreadId)
-  const linkLabel = rtcStateLabel(rtcState, dataChannelOpen)
-
-  useEffect(() => {
-    const video = videoRef.current
-    if (video && remoteStream) {
-      video.srcObject = remoteStream
-      video.play().catch(() => {})
-    }
-  }, [remoteStream])
-
-  return (
-    <section className="panel detail">
-      <div className="detail-head">
-        <div>
-          <p className="eyebrow">Controle remoto</p>
-          <h2>{hasCodex ? 'Codex + tela' : 'Tela do Mac'}</h2>
-        </div>
-        <span className={`status-pill ${rtcState}`}>{linkLabel}</span>
-      </div>
-      <div className="tabs" role="tablist" aria-label="Modo">
-        <button className={tab === 'janela' ? 'active' : ''} onClick={() => setTab('janela')} role="tab" aria-selected={tab === 'janela'}>
-          Tela
-        </button>
-        {hasCodex && (
-          <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')} role="tab" aria-selected={tab === 'chat'}>
-            Chat
-          </button>
-        )}
-      </div>
-
-      {tab === 'janela' ? (
-        <div className="control-panel">
-          <div className={`video-wrapper ${fullScreen ? 'fullscreen' : ''}`}>
-            <video ref={videoRef} muted playsInline autoPlay className="relay-video" />
-            {!remoteStream && (
-              <p className="video-placeholder muted">
-                {dataChannelOpen
-                  ? 'Canal aberto. Vídeo da tela ainda em construção — teclado/colar já podem funcionar.'
-                  : 'Conectando ao Mac…'}
-              </p>
-            )}
-          </div>
-          <div className="controls">
-            <button className={target === 'display' ? 'active' : ''} onClick={() => onTargetChange('display')}>
-              Tela cheia
-            </button>
-            <button className={target === 'window' ? 'active' : ''} onClick={() => onTargetChange('window')}>
-              Janela
-            </button>
-            <button onClick={onToggleFullScreen}>{fullScreen ? 'Sair' : 'Expandir'}</button>
-          </div>
-          <div className="controls">
-            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'keyDown', key: 'space' })}>
-              Teclado
-            </button>
-            <button disabled={!dataChannelOpen} onClick={() => onSendInput({ type: 'mouseMove', x: 0.5, y: 0.5 })}>
-              Mouse
-            </button>
-            <button
-              disabled={!dataChannelOpen}
-              onClick={() => onSendClipboard(clipboardText || ' ')}
-              title={dataChannelOpen ? 'Colar no Mac' : 'Aguardando conexão'}
-            >
-              Colar
-            </button>
-            <button onClick={onReleaseControl}>Sair</button>
-          </div>
-          <input
-            value={clipboardText}
-            onChange={(e) => setClipboardText(e.target.value)}
-            placeholder="Texto para colar no Mac"
-          />
-          <p className="muted">
-            Serve pra qualquer CLI aberta no Mac. Vídeo completo e helper de captura ainda evoluem; o caminho principal é ver e digitar na tela.
-          </p>
-          <button type="button" className="secondary" onClick={() => setShowDetails((v) => !v)}>
-            {showDetails ? 'Ocultar detalhes' : 'Detalhes técnicos'}
-          </button>
-          {showDetails && (
-            <dl className="tech-details">
-              <div><dt>Pasta</dt><dd>{session.cwd}</dd></div>
-              <div><dt>Processo</dt><dd>{session.pid ?? '—'}</dd></div>
-              <div><dt>Tipo</dt><dd>{session.harness}</dd></div>
-              {session.codexThreadId && <div><dt>Codex</dt><dd>{session.codexThreadId}</dd></div>}
-            </dl>
-          )}
-        </div>
-      ) : (
-        <div className="control-panel">
-          <p className="muted">Mensagens vão para a thread Codex desta sessão.</p>
-          <textarea
-            value={promptText}
-            onChange={(e) => onPromptChange(e.target.value)}
-            placeholder="Escreva o prompt…"
-            rows={3}
-          />
-          <div className="controls">
-            <button disabled={busy || !promptText.trim()} onClick={onSendTurn}>
-              {busy ? 'Enviando…' : 'Enviar'}
-            </button>
-            <button disabled={busy} onClick={onInterruptTurn}>
-              Parar
-            </button>
-            <button onClick={onCopyCwd}>Copiar pasta</button>
-            <button onClick={onReleaseControl}>Sair</button>
-          </div>
-        </div>
-      )}
-    </section>
-  )
-}
-
-function rtcStateLabel(state: ConnectionState, dataOpen: boolean): string {
-  if (dataOpen || state === 'connected') return 'Pronto'
-  if (state === 'connecting' || state === 'reconnecting') return 'Conectando…'
-  if (state === 'failed') return 'Falhou'
-  if (state === 'disconnected') return 'Desconectado'
-  return 'Aguardando'
-}
-
-function ApprovalModal({ approval, onDecide, onClose }: { approval: CodexApproval; onDecide: (a: CodexApproval, decision: 'accept' | 'deny') => void; onClose: () => void }) {
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
         <h2 id="approval-title">Aprovação pendente</h2>
         <dl>
-          <div><dt>Comando</dt><dd>{approval.command || 'n/d'}</dd></div>
-          <div><dt>CWD</dt><dd>{approval.cwd || 'n/d'}</dd></div>
-          <div><dt>Motivo</dt><dd>{approval.reason || 'n/d'}</dd></div>
+          <div>
+            <dt>Comando</dt>
+            <dd>{approval.command || 'n/d'}</dd>
+          </div>
+          <div>
+            <dt>Pasta</dt>
+            <dd>{approval.cwd || 'n/d'}</dd>
+          </div>
+          <div>
+            <dt>Motivo</dt>
+            <dd>{approval.reason || 'n/d'}</dd>
+          </div>
         </dl>
         <div className="modal-actions">
-          <button onClick={() => onDecide(approval, 'accept')}>Permitir</button>
-          <button className="secondary" onClick={() => onDecide(approval, 'deny')}>Negar</button>
-          <button className="secondary" onClick={onClose}>Fechar</button>
+          <button type="button" onClick={() => onDecide(approval, 'accept')}>
+            Permitir
+          </button>
+          <button type="button" className="secondary" onClick={() => onDecide(approval, 'deny')}>
+            Negar
+          </button>
+          <button type="button" className="secondary" onClick={onClose}>
+            Fechar
+          </button>
         </div>
       </section>
     </div>
@@ -610,14 +809,46 @@ function Shell({ children }: { children: ReactNode }) {
 function readPairState(): PairState | null {
   try {
     const raw = localStorage.getItem(STORED_PAIR)
-    return raw ? JSON.parse(raw) as PairState : null
+    return raw ? (JSON.parse(raw) as PairState) : null
   } catch {
     return null
   }
 }
 
-function formatTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'n/d'
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+function shortCwd(cwd: string | undefined): string {
+  if (!cwd) return ''
+  return cwd
+    .replace(/^\/Users\/[^/]+/, '~')
+    .replace(/^\/home\/[^/]+/, '~')
+}
+
+function sessionTitle(session: SessionDescriptor): string {
+  return session.title || session.nativeSessionId || session.id
+}
+
+function harnessLabel(session: SessionDescriptor): string {
+  if (session.codexThreadId || session.harness === 'codex') return 'Codex'
+  if (session.harness === 'maestri') return 'Maestri'
+  return 'Terminal'
+}
+
+function avatarLetter(session: SessionDescriptor): string {
+  const t = sessionTitle(session)
+  return (t[0] || 'T').toUpperCase()
+}
+
+function rtcStateLabel(state: ConnectionState, dataOpen: boolean): string {
+  if (dataOpen || state === 'connected') return 'Pronto'
+  if (state === 'connecting' || state === 'reconnecting') return 'Conectando…'
+  if (state === 'failed') return 'Falhou'
+  if (state === 'disconnected') return 'Desconectado'
+  return 'Aguardando'
+}
+
+function formatTime(value: string): string {
+  try {
+    return new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return value
+  }
 }

@@ -109,12 +109,12 @@ func TestLocalTokenPersistedInStore(t *testing.T) {
 	require.NotEmpty(t, ag1.LocalToken())
 
 	ag2, err := New(Config{
-		Addr:      "127.0.0.1:0",
+		Addr:       "127.0.0.1:0",
 		DisableTLS: true,
-		SessionID: "persisted-token",
-		HostName:  "test-host",
-		BasePath:  t.TempDir(),
-		Store:     store,
+		SessionID:  "persisted-token",
+		HostName:   "test-host",
+		BasePath:   t.TempDir(),
+		Store:      store,
 	})
 	require.NoError(t, err)
 	require.Equal(t, ag1.LocalToken(), ag2.LocalToken())
@@ -122,6 +122,47 @@ func TestLocalTokenPersistedInStore(t *testing.T) {
 	loaded, err := LoadLocalToken(store, "persisted-token")
 	require.NoError(t, err)
 	require.Equal(t, ag1.LocalToken(), loaded)
+
+	// Agente com outro sessionID reutiliza o mesmo token único do host (multi-CLI).
+	ag3, err := New(Config{
+		Addr:       "127.0.0.1:0",
+		DisableTLS: true,
+		SessionID:  "other-session",
+		HostName:   "test-host",
+		BasePath:   t.TempDir(),
+		Store:      store,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ag1.LocalToken(), ag3.LocalToken())
+}
+
+func TestLoadLocalTokenFallback(t *testing.T) {
+	// Conta canônica "host" é achada independente do sessionID.
+	store := keychain.NewFakeStore()
+	require.NoError(t, store.SaveSecret("relay-local-token", "host", []byte("canonical-token")))
+	loaded, err := LoadLocalToken(store, "alpha")
+	require.NoError(t, err)
+	require.Equal(t, "canonical-token", loaded)
+
+	// Legado host-{sessionID} funciona para o mesmo sessionID.
+	store2 := keychain.NewFakeStore()
+	require.NoError(t, store2.SaveSecret("relay-local-token", "host-alpha", []byte("legacy-token")))
+	loaded, err = LoadLocalToken(store2, "alpha")
+	require.NoError(t, err)
+	require.Equal(t, "legacy-token", loaded)
+
+	// Conta canônica "host" tem prioridade sobre legado.
+	require.NoError(t, store2.SaveSecret("relay-local-token", "host", []byte("canonical-token")))
+	loaded, err = LoadLocalToken(store2, "alpha")
+	require.NoError(t, err)
+	require.Equal(t, "canonical-token", loaded)
+
+	// host-default também é fallback.
+	store3 := keychain.NewFakeStore()
+	require.NoError(t, store3.SaveSecret("relay-local-token", "host-default", []byte("default-token")))
+	loaded, err = LoadLocalToken(store3, "gamma")
+	require.NoError(t, err)
+	require.Equal(t, "default-token", loaded)
 }
 
 func TestOfferAndPair(t *testing.T) {

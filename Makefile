@@ -6,11 +6,12 @@ web-build:
 	cd apps/web && npm run build
 
 go-build:
-	go build ./cmd/relay
+	go build -o remotecli ./cmd/relay
 
 install: go-build
 	mkdir -p $(HOME)/.local/bin
-	cp relay $(HOME)/.local/bin/relay
+	cp remotecli $(HOME)/.local/bin/remotecli
+	ln -sf remotecli $(HOME)/.local/bin/relay
 
 test: go-test web-test swift-test
 
@@ -33,4 +34,4 @@ fmt:
 	gofmt -w cmd internal shared
 
 clean:
-	rm -rf apps/web/dist relay helper/RelayHelper/.build
+	rm -rf apps/web/dist remotecli relay helper/RelayHelper/.build

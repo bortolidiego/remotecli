@@ -31,12 +31,25 @@ export interface SessionDescriptor {
   frontmost: boolean
   status: Status
   capabilities: Capability[]
+  title?: string
+  lastSeenAt?: string
+  maestri_agent_name?: string
+  maestri_socket?: string
+  maestri_cli?: string
   // legado Marco 1
   session_id: string
   host_id: string
   devices: DeviceInfo[]
   created_at: string
   expires_at: string
+}
+
+export interface SessionMessageResult {
+  status: string
+  mode: 'maestri_ask' | 'local_inject' | 'codex_turn' | string
+  reply?: string
+  turn_id?: string
+  error?: string
 }
 
 export interface AgentStatus {

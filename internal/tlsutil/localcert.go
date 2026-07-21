@@ -30,9 +30,12 @@ func EnsureLocalCert(dir string) (tls.Certificate, error) {
 	keyPath := filepath.Join(dir, "key.pem")
 	if fileExists(certPath) && fileExists(keyPath) {
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-		if err == nil {
+		if err == nil && certCoversCurrentIPs(cert) {
 			return cert, nil
 		}
+		// IP da LAN mudou: regenera SAN com IPs atuais.
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyPath)
 	}
 	if err := generateSelfSigned(certPath, keyPath); err != nil {
 		return tls.Certificate{}, err
@@ -58,6 +61,27 @@ func DescribePaths() string {
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
+}
+
+
+func certCoversCurrentIPs(cert tls.Certificate) bool {
+	if len(cert.Certificate) == 0 {
+		return false
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return false
+	}
+	have := map[string]bool{}
+	for _, ip := range parsed.IPAddresses {
+		have[ip.String()] = true
+	}
+	for _, ip := range collectIPs() {
+		if ip.To4() != nil && !ip.IsLoopback() && !have[ip.String()] {
+			return false
+		}
+	}
+	return true
 }
 
 func generateSelfSigned(certPath, keyPath string) error {

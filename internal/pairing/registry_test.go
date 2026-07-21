@@ -196,3 +196,63 @@ func TestSharedKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, clientShared, sess.SharedKey)
 }
+
+func TestMetadataEndpointUpdatesSessionDescriptor(t *testing.T) {
+	r := newTestRegistry(t)
+	pid1 := 1001
+	pid2 := 1002
+	r.SetSessionMetadata(contracts.SessionMetadata{
+		Harness:         contracts.HarnessNative,
+		NativeSessionID: "term-1",
+		PID:             &pid1,
+		Cwd:             "/tmp/a",
+		Title:           "Terminal A",
+	})
+	r.SetSessionMetadata(contracts.SessionMetadata{
+		Harness:         contracts.HarnessNative,
+		NativeSessionID: "term-2",
+		PID:             &pid2,
+		Cwd:             "/tmp/b",
+		Title:           "Terminal B",
+	})
+	sessions := r.Sessions()
+	require.Len(t, sessions, 2)
+	titles := map[string]string{}
+	ids := map[string]bool{}
+	for _, s := range sessions {
+		titles[s.Title] = s.ID
+		ids[s.ID] = true
+	}
+	require.ElementsMatch(t, []string{"Terminal A", "Terminal B"}, []string{sessions[0].Title, sessions[1].Title})
+	require.Contains(t, ids, "term-1")
+	require.Contains(t, ids, "term-2")
+
+	// Upsert: atualiza title/cwd do mesmo id sem criar novo.
+	r.SetSessionMetadata(contracts.SessionMetadata{
+		Harness:         contracts.HarnessNative,
+		NativeSessionID: "term-1",
+		PID:             &pid1,
+		Cwd:             "/tmp/a-updated",
+		Title:           "Terminal A Updated",
+	})
+	sessions = r.Sessions()
+	require.Len(t, sessions, 2)
+	for _, s := range sessions {
+		if s.ID == "term-1" {
+			require.Equal(t, "Terminal A Updated", s.Title)
+			require.Equal(t, "/tmp/a-updated", s.Cwd)
+		}
+	}
+
+	// Fallback legado: SessionByID por id antigo funciona quando só há descritores.
+	_, ok := r.SessionByID("term-1")
+	require.True(t, ok)
+}
+
+func TestSessionFallbackWhenEmpty(t *testing.T) {
+	r := newTestRegistry(t)
+	sessions := r.Sessions()
+	require.Len(t, sessions, 1)
+	require.Equal(t, r.HostID(), sessions[0].ID)
+	require.Equal(t, contracts.StatusActive, sessions[0].Status)
+}

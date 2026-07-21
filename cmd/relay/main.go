@@ -27,18 +27,61 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-var version = "relay-m2"
+var version = "remotecli-0.1"
 
-// CLI expõe os comandos do Relay.
+// CLI — Remote CliControl (comando: remotecli).
 type CLI struct {
+	// Comandos principais (produto)
+	Relay       RelayCmd       `cmd:"" help:"Liga o Remote CliControl no Mac e mostra QR se o celular ainda não estiver pareado."`
+	Here        HereCmd        `cmd:"" help:"Registra ESTE terminal na lista do celular (qualquer CLI). Sem QR se já estiver pareado."`
+	PhoneBridge PhoneBridgeCmd `cmd:"" name:"phone-bridge" help:"Loop do terminal ponte Maestri (rcli-phone) — entrega mensagens do celular na conversa."`
+	EnsureBridge EnsureBridgeCmd `cmd:"" name:"ensure-bridge" help:"Garante o terminal rcli-phone no canvas Maestri (maestro)."`
+
+	// Operação / legado
 	Serve   ServeCmd   `cmd:"" help:"Sobe o agente em foreground (daemon)."`
-	Setup   SetupCmd   `cmd:"" help:"Inicializa sessão e identidade no Keychain."`
-	Share   ShareCmd   `cmd:"" help:"Gera oferta QR one-time; sobe o agente se necessário."`
-	Pair    PairCmd    `cmd:"" help:"Valida uma oferta lida do QR; o pareamento real é feito pela PWA."`
-	Status  StatusCmd   `cmd:"" help:"Consulta status do agente local."`
+	Setup   SetupCmd   `cmd:"" help:"Configura sessão/tunnel e sobe o agente."`
+	Share   ShareCmd   `cmd:"" hidden:"" help:"Alias legado de 'remotecli relay'."`
+	Pair    PairCmd    `cmd:"" help:"Valida uma oferta lida do QR."`
+	Status  StatusCmd  `cmd:"" help:"Status do agente local."`
 	Stop    StopCmd    `cmd:"" help:"Para o agente local."`
-	Devices DevicesCmd  `cmd:"" help:"Lista dispositivos emparelhados."`
+	Devices DevicesCmd `cmd:"" help:"Lista dispositivos emparelhados."`
 	Revoke  RevokeCmd  `cmd:"" help:"Revoga um dispositivo."`
+}
+
+// PhoneBridgeCmd processa a fila de mensagens do celular → sessão Maestri.
+type PhoneBridgeCmd struct {
+	Once bool `help:"Processa a fila uma vez e sai (para loops externos)."`
+}
+
+func (c *PhoneBridgeCmd) Run(ctx *kong.Context) error {
+	if c.Once {
+		n, err := agent.ProcessOutboxOnce()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			fmt.Printf("bridge: entregues %d\n", n)
+		}
+		return nil
+	}
+	fmt.Println("remotecli phone-bridge · entregando mensagens do celular nas sessões…")
+	for {
+		n, err := agent.ProcessOutboxOnce()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bridge: %v\n", err)
+		}
+		if n > 0 {
+			fmt.Printf("bridge: entregues %d mensagem(ns)\n", n)
+		}
+		time.Sleep(800 * time.Millisecond)
+	}
+}
+
+// EnsureBridgeCmd recruta rcli-phone se faltar (requer maestro).
+type EnsureBridgeCmd struct{}
+
+func (c *EnsureBridgeCmd) Run(ctx *kong.Context) error {
+	return ensurePhoneBridge()
 }
 
 // SharedFlags usadas por comandos que precisam do agente.
@@ -141,7 +184,8 @@ func (s *SetupCmd) Run(ctx *kong.Context) error {
 	}, true)
 }
 
-type ShareCmd struct {
+// SyncFlags flags comuns a remotecli relay / remotecli here / share.
+type SyncFlags struct {
 	SharedFlags
 	Frontmost bool   `help:"Marca a sessão como frontmost no descritor."`
 	WindowID  string `help:"Identificador da janela nativa, quando conhecido."`
@@ -149,23 +193,62 @@ type ShareCmd struct {
 	QROut     string `help:"Caminho do PNG QR. Default: relay-pair-<sessao>.png no cwd."`
 	NoTunnel  bool   `help:"Não inicia o tunnel mesmo que configurado."`
 	NoStart   bool   `help:"Não sobe o agente se ele estiver parado; erro claro."`
-	NoOpen    bool   `help:"Não abre o PNG do QR no Preview (padrão: abre no macOS para escanear fácil)."`
+	NoOpen    bool   `help:"Não abre o PNG do QR no Preview (padrão: abre no macOS)."`
+	ForceQR   bool   `help:"Sempre mostra QR, mesmo se o celular já estiver pareado."`
+}
+
+// RelayCmd: remotecli relay — liga o serviço + QR se necessário.
+type RelayCmd struct {
+	SyncFlags
+}
+
+func (c *RelayCmd) Run(ctx *kong.Context) error {
+	return runSyncSession(c.SyncFlags, syncModeRelay)
+}
+
+// HereCmd: remotecli here — registra ESTE terminal (sem QR se já pareado).
+type HereCmd struct {
+	SyncFlags
+}
+
+func (c *HereCmd) Run(ctx *kong.Context) error {
+	return runSyncSession(c.SyncFlags, syncModeHere)
+}
+
+// ShareCmd: alias legado de remotecli relay.
+type ShareCmd struct {
+	SyncFlags
 }
 
 func (s *ShareCmd) Run(ctx *kong.Context) error {
+	return runSyncSession(s.SyncFlags, syncModeRelay)
+}
+
+type syncMode int
+
+const (
+	syncModeRelay syncMode = iota // QR se ninguém pareado (ou ForceQR)
+	syncModeHere                  // só metadata se já pareado; QR só se 1º dispositivo
+)
+
+func runSyncSession(s SyncFlags, mode syncMode) error {
 	selfExe, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	s.SessionID = resolveSessionID(s.SessionID)
-	fmt.Printf("Sessão: %s\n", s.SessionID)
-	clientAddr := clientAddr(s.Addr)
+	label := "relay"
+	if mode == syncModeHere {
+		label = "here"
+	}
+	fmt.Printf("remotecli %s · sessão: %s\n", label, s.SessionID)
+	cAddr := clientAddr(s.Addr)
 	if s.NoStart {
-		if !agentHealthy(clientAddr) {
-			return fmt.Errorf("agente não está no ar; rode sem --no-start ou inicie com 'relay serve %s'", s.SessionID)
+		if !agentHealthy(cAddr) {
+			return fmt.Errorf("agente não está no ar; rode: remotecli relay")
 		}
 	} else {
-		startedAgent, err := ensureAgentRunning(selfExe, s.SessionID, clientAddr, defaultAgentStartTimeout)
+		startedAgent, err := ensureAgentRunning(selfExe, s.SessionID, cAddr, defaultAgentStartTimeout)
 		if err != nil {
 			return err
 		}
@@ -181,13 +264,13 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	}
 
 	if !s.NoTunnel {
-		if err := requestTunnelStart(clientAddr, token); err != nil {
+		if err := requestTunnelStart(cAddr, token); err != nil {
 			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
-				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado. Instale com 'brew install cloudflared' para acesso remoto.\n")
+				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado.\n")
 			} else if errors.Is(err, tunnel.ErrTokenMissing) {
-				fmt.Fprintf(os.Stderr, "Aviso: token do tunnel não configurado. Tunnel não iniciado. Use setup --tunnel-enabled --tunnel-token=... ou RELAY_TUNNEL_TOKEN.\n")
+				fmt.Fprintf(os.Stderr, "Aviso: token do tunnel não configurado.\n")
 			} else if errors.Is(err, tunnel.ErrTunnelDisabled) || isAgentTunnelDisabled(err) {
-				// silencioso quando desabilitado
+				// silencioso
 			} else {
 				return err
 			}
@@ -198,10 +281,32 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := postAgent(clientAddr, "/api/metadata", metaBody, token); err != nil {
+	if _, err := postAgent(cAddr, "/api/metadata", metaBody, token); err != nil {
 		return err
 	}
-	body, err := postAgent(clientAddr, "/api/offer", nil, token)
+
+	// Garante ponte Maestri (rcli-phone) para o celular falar na conversa de verdade.
+	if os.Getenv("MAESTRI_TERMINAL_ID") != "" {
+		if err := ensurePhoneBridge(); err != nil {
+			fmt.Fprintf(os.Stderr, "Aviso: ponte phone-bridge: %v\n", err)
+		}
+	}
+
+	paired, _ := agentHasPairedDevice(cAddr, token)
+	// QR só se ninguém pareado ainda (ou --force-qr).
+	needQR := s.ForceQR || !paired
+	if !needQR {
+		if mode == syncModeHere {
+			fmt.Println("Terminal registrado na lista do celular (sem novo QR).")
+			fmt.Println("No iPhone: abra o app e escolha esta sessão.")
+		} else {
+			fmt.Println("Mac já tem celular pareado — sessão sincronizada.")
+			fmt.Println("Use: remotecli relay --force-qr   para novo QR.")
+		}
+		return nil
+	}
+
+	body, err := postAgent(cAddr, "/api/offer", nil, token)
 	if err != nil {
 		return err
 	}
@@ -227,7 +332,6 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	if qrPath == "" {
 		qrPath = defaultQRPath(s.SessionID)
 	}
-	// QR curto no terminal (código de claim) — o celular busca o envelope em /api/claim.
 	qrURL := buildClaimURL(offer.Endpoint, offerResp.ClaimCode)
 	if err := writeQRCode(qrPath, qrURL); err != nil {
 		return err
@@ -235,8 +339,6 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	fmt.Println()
 	fmt.Println("Escaneie com o celular (mesma Wi‑Fi):")
 	fmt.Println()
-	// No Maestri/chat o QR em caracteres vira bloco cinza ilegível — no Terminal.app real fica ok.
-	// Sempre geramos PNG e, no macOS, abrimos o Preview para escaneamento confiável.
 	if isInteractiveTerminal() {
 		if err := printQRTerminal(qrURL); err != nil {
 			fmt.Fprintf(os.Stderr, "Aviso: QR no terminal falhou: %v\n", err)
@@ -257,6 +359,25 @@ func (s *ShareCmd) Run(ctx *kong.Context) error {
 	fmt.Printf("Arquivo: %s\n", qrPath)
 	fmt.Println("Oferta expira em 2 minutos. No iPhone: aceite o certificado HTTPS e toque em Parear.")
 	return nil
+}
+
+func agentHasPairedDevice(addr, token string) (bool, error) {
+	b, err := getAgent(addr, "/api/devices", token)
+	if err != nil {
+		return false, err
+	}
+	var devices []any
+	if err := json.Unmarshal(b, &devices); err != nil {
+		// status autenticado às vezes devolve objeto — tenta campo devices
+		var wrap struct {
+			Devices []any `json:"devices"`
+		}
+		if err2 := json.Unmarshal(b, &wrap); err2 != nil {
+			return false, err
+		}
+		return len(wrap.Devices) > 0, nil
+	}
+	return len(devices) > 0, nil
 }
 
 type PairCmd struct {
@@ -537,9 +658,9 @@ func ensureLocalToken(override, sessionID string, store keychain.Store, timeout 
 		time.Sleep(100 * time.Millisecond)
 	}
 	if agentHealthy(clientAddr("0.0.0.0:24109")) {
-		return "", fmt.Errorf("agente já está no ar com outra sessão; rode: relay stop && relay share")
+		return "", fmt.Errorf("agente está no ar mas token local não encontrado; rode: remotecli relay no Mac para reiniciar o token")
 	}
-	return "", fmt.Errorf("token local não encontrado no Keychain para %s", sessionID)
+	return "", fmt.Errorf("token local não encontrado no Keychain; rode: remotecli relay no Mac")
 }
 
 func resolveLocalToken(override, sessionID string, store keychain.Store) (string, error) {
@@ -702,28 +823,177 @@ func buildSessionMetadata(sessionID, windowID string, frontmost bool, targetPID 
 	if pid <= 0 {
 		pid = os.Getppid()
 	}
+	cwd, _ := os.Getwd()
 	meta := contracts.SessionMetadata{
 		Harness:         contracts.HarnessNative,
 		NativeSessionID: sessionID,
 		PID:             &pid,
 		Frontmost:       frontmost,
+		Cwd:             cwd,
+		SessionKey:      sessionID,
+		Title:           deriveCLITitle(sessionID, cwd),
 	}
 	if codex := os.Getenv("CODEX_THREAD_ID"); codex != "" {
 		meta.Harness = contracts.HarnessCodex
 		meta.CodexThreadID = &codex
-		meta.NativeSessionID = codex
+		meta.SessionKey = "codex-" + codex
+		meta.Title = "Codex"
 	}
 	if maestri := os.Getenv("MAESTRI_TERMINAL_ID"); maestri != "" {
 		if meta.Harness == contracts.HarnessNative {
 			meta.Harness = contracts.HarnessMaestri
-			meta.NativeSessionID = maestri
+			meta.SessionKey = "maestri-" + maestri
 		}
 		meta.MaestriTerminalID = &maestri
+		meta.MaestriCLI = os.Getenv("MAESTRI_CLI")
+		if meta.MaestriCLI == "" {
+			meta.MaestriCLI = "maestri"
+		}
+		meta.MaestriSocket = os.Getenv("MAESTRI_SOCKET")
+		meta.MaestriAgentName = discoverMaestriAgentName(meta.MaestriCLI)
+		if meta.Title == "" || meta.Title == sessionID {
+			if meta.MaestriAgentName != "" {
+				meta.Title = meta.MaestriAgentName
+			} else {
+				meta.Title = "Maestri:" + maestri
+			}
+		}
 	}
 	if windowID != "" {
 		meta.WindowID = &windowID
 	}
 	return meta
+}
+
+func deriveCLITitle(sessionID, cwd string) string {
+	if sessionID != "default" {
+		return sessionID
+	}
+	if cwd != "" {
+		base := filepath.Base(cwd)
+		if base != "" && base != "/" {
+			return base
+		}
+	}
+	return "Terminal"
+}
+
+const phoneBridgeAgent = "rcli-phone"
+
+func copyFile(src, dst string) error {
+	in, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, in, 0o755)
+}
+
+func ensurePhoneBridge() error {
+	cli := os.Getenv("MAESTRI_CLI")
+	if cli == "" {
+		cli = "maestri"
+	}
+	out, err := exec.Command(cli, "list").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("maestri list: %w", err)
+	}
+	list := string(out)
+	if strings.Contains(list, `"`+phoneBridgeAgent+`"`) || strings.Contains(list, phoneBridgeAgent) {
+		// tenta conectar orquestrador ↔ bridge (idempotente se já ligado)
+		self := parseMaestriAgentName(list)
+		if self != "" && self != phoneBridgeAgent {
+			_ = exec.Command(cli, "connect", self, phoneBridgeAgent).Run()
+		}
+		return nil
+	}
+	// Recruta terminal ponte: só processa outbox (sem modelo AI caro).
+	selfExe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// Nota: ~/.local/bin/remotecli phone-bridge é morto (SIGKILL) neste Mac;
+	// usamos cópia rcli-bridge no mesmo dir.
+	bridgeBin := selfExe
+	if dir := filepath.Dir(selfExe); dir != "" {
+		alt := filepath.Join(dir, "rcli-bridge")
+		if err := copyFile(selfExe, alt); err == nil {
+			bridgeBin = alt
+		}
+	}
+	cmdLine := fmt.Sprintf("bash -lc 'while true; do %q phone-bridge --once; sleep 1; done'", bridgeBin)
+	recruit := exec.Command(cli, "recruit", phoneBridgeAgent, "--command", cmdLine)
+	recruit.Env = os.Environ()
+	b, err := recruit.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("recruit %s: %w (%s)", phoneBridgeAgent, err, strings.TrimSpace(string(b)))
+	}
+	self := parseMaestriAgentName(list)
+	if self == "" {
+		self = parseMaestriAgentName(string(b))
+	}
+	if self != "" {
+		_ = exec.Command(cli, "connect", self, phoneBridgeAgent).Run()
+	}
+	fmt.Printf("Ponte %s criada no Maestri (mensagens do celular → conversa real).\n", phoneBridgeAgent)
+	return nil
+}
+
+// discoverMaestriAgentName parseia `maestri list` e retorna o nome do agente "You".
+func discoverMaestriAgentName(cli string) string {
+	if cli == "" {
+		cli = "maestri"
+	}
+	cmd := exec.Command(cli, "list")
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return parseMaestriAgentName(string(out))
+}
+
+func parseMaestriAgentName(output string) string {
+	lines := strings.Split(output, "\n")
+	inYou := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "You:") {
+			inYou = true
+			continue
+		}
+		if inYou {
+			if strings.HasPrefix(trimmed, "Connected agents:") || trimmed == "" {
+				break
+			}
+			if strings.HasPrefix(trimmed, "-") {
+				name := extractMaestriNameField(trimmed)
+				if name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func extractMaestriNameField(line string) string {
+	// Esperado: - name: "Codex #2", role: "..."  OU  - name: "RelayMulti"
+	if !strings.Contains(line, "name:") {
+		return ""
+	}
+	// extrai o primeiro valor entre aspas após name:
+	idx := strings.Index(line, "name:")
+	rest := line[idx+len("name:"):]
+	q1 := strings.Index(rest, `"`)
+	if q1 < 0 {
+		return ""
+	}
+	rest = rest[q1+1:]
+	q2 := strings.Index(rest, `"`)
+	if q2 < 0 {
+		return ""
+	}
+	return rest[:q2]
 }
 
 func localIP() string {
@@ -744,8 +1014,8 @@ func localIP() string {
 func main() {
 	var cli CLI
 	ctx := kong.Parse(&cli,
-		kong.Name("relay"),
-		kong.Description("Relay CLI — Remote CliControl"),
+		kong.Name("remotecli"),
+		kong.Description("Remote CliControl — controle remoto de CLIs no Mac"),
 		kong.UsageOnError(),
 		kong.Vars{"version": version},
 	)

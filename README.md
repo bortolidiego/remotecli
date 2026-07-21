@@ -1,159 +1,157 @@
-# Relay - Marco 4.2
+# Remote CliControl (`remotecli`)
 
-MVP pessoal para macOS arm64 com agente Go local, PWA embarcada/offline, CLI e helper Swift de menu bar. **Marco 4.2** adiciona o Adapter Codex (`internal/codex`) e integra turnos/aprovações na PWA.
+Controle remoto de CLIs e agentes no Mac a partir do celular (mesma Wi‑Fi).
 
-## Estrutura
+**1 QR por Mac**, vários terminais na lista do iPhone. Parecido com “continuar a sessão no telefone” — ainda em evolução (vídeo da tela e ida-e-volta de chat).
+
+| | |
+|---|---|
+| **CLI** | `remotecli` |
+| **Plataforma** | macOS (desenvolvimento em arm64) |
+| **Licença** | [GPL-3.0](./LICENSE) |
+| **Pasta legada** | o repositório ainda se chama `relay` em alguns paths internos |
+
+---
+
+## O que faz
+
+1. Sobe um **agente local** no Mac (HTTPS na LAN, porta `24109`).
+2. Gera **QR** para o iPhone parear (certificado autoassinado — o Safari pede confiança uma vez).
+3. Com `remotecli here`, cada terminal **aparece na lista** do celular.
+4. No celular você escolhe a sessão e **envia mensagens** (Maestri/Codex/terminal — conforme o que estiver rodando).
+
+---
+
+## Requisitos
+
+- macOS
+- Go 1.22+ (build)
+- Node 20+ (PWA)
+- (Opcional) Xcode / Swift para o helper de captura
+- Celular na **mesma Wi‑Fi** do Mac (sem tunnel Cloudflare por padrão)
+
+---
+
+## Instalação (desenvolvimento)
+
+```bash
+git clone https://github.com/bortolidiego/remotecli.git
+cd remotecli
+
+# Frontend embutido no binário
+make web-build   # ou: cd apps/web && npm ci && npm run build
+
+# Binário
+make go-build    # gera ./remotecli (conforme Makefile)
+make install     # opcional: copia para ~/.local/bin e symlink relay
+```
+
+Confira se `~/.local/bin` está no `PATH`.
+
+---
+
+## Uso rápido
+
+```bash
+# 1) No Mac — liga o serviço e mostra QR (se ainda não pareou)
+remotecli relay
+
+# Forçar novo QR
+remotecli relay --force-qr
+
+# 2) Em cada terminal que quiser no celular
+remotecli here
+
+# 3) No iPhone: abra o link do QR (https://<IP-do-Mac>:24109/?c=…)
+#    Aceite o certificado → Parear → escolha a sessão
+```
+
+Outros comandos úteis:
+
+```bash
+remotecli status
+remotecli devices
+remotecli stop
+remotecli --help
+```
+
+---
+
+## Estrutura do repo
 
 ```text
-apps/web              React + Vite + TypeScript PWA com WebRTC/signaling
-cmd/relay             CLI Go
-internal/agent        Servidor HTTP local 127.0.0.1:24109 + signaling WebRTC
-internal/channel      Envelope AES-256-GCM com AAD e replay guard
-internal/codex        JSON-RPC client para Codex app-server (transporte stdio/socket injetável + fake)
-internal/crypto       ECDSA P-256, ECDH P-256, HKDF, AES-256-GCM
-internal/geometry     Coordenadas normalizadas entre vídeo e captura
-internal/ipc          Unix domain socket Go↔helper com framing binário
-internal/keychain     Store interface: macOS security CLI / fake para testes
-internal/pairing      Registry, QR one-time, nonce replay guard, lease
-internal/sandbox      Path canonico + bloqueios + limite 25MB
-internal/tunnel       Cloudflare Tunnel: Start/Stop/Status, runner real/fake
-internal/web          go:embed de apps/web/dist com fallback SPA/PWA
-internal/webrtc       PeerConnection Pion por lease, DataChannels, ICE
-shared/contracts      SessionDescriptor e payloads compartilhados
-helper/RelayHelper    SwiftPM helper LSUIElement/menu bar + ScreenCaptureKit/VideoToolbox
+apps/web              PWA (React + Vite + TypeScript)
+cmd/relay             CLI Go (remotecli)
+internal/             agente, pairing, WebRTC, codex, tunnel, …
+shared/contracts      contratos compartilhados
+helper/RelayHelper    helper Swift (menu bar / captura — WIP)
 ```
 
-## Build e Testes
+---
+
+## Testes
 
 ```bash
-make web-build
-make go-build
 make go-test
-make race
 make web-test
+# opcional
+make race
 make swift-build
-make swift-test
 ```
 
-Equivalentes diretos:
+---
 
-```bash
-go test ./...
-go test -race ./...
-cd apps/web && npm run build && npm test
-cd helper/RelayHelper && swift build && swift test
-```
+## Segurança (importante)
 
-## Uso Local
+- O agente escuta na **rede local**. Use só em Wi‑Fi de confiança.
+- Certificado **autoassinado** — o navegador do iPhone vai avisar; isso é esperado em LAN.
+- **Não** commite tokens, `.env`, certificados de produção, nem dados de `~/.relay/`.
+- Pareamento e lease são por dispositivo; use `remotecli devices` / revogar se precisar.
 
-### Fluxo feliz (um comando)
+---
 
-```bash
-make install
-relay share
-```
+## Status do produto (honesto)
 
-`relay share` sobe o agente em background se necessário, cria identidade/token no Keychain se for a primeira vez, atualiza metadata da sessão e gera QR PNG no diretório atual. Funciona em qualquer terminal (Codex, Maestri, shell).
+| Área | Estado |
+|---|---|
+| Pareamento QR + LAN HTTPS | Funciona |
+| Multi-sessão (`here`) | Funciona |
+| UI celular (lista + digitar) | MVP |
+| Chat ida-e-volta (espelhar resposta no celular) | Em evolução |
+| Vídeo da tela do Mac | Incompleto |
+| Tunnel Cloudflare (fora da Wi‑Fi) | Scaffold / opcional |
 
-### Comando explícito (foreground)
+Detalhes de desenvolvimento interno podem estar em `STATUS.md` (pode estar defasado em relação ao código).
 
-```bash
-go build ./cmd/relay
-./relay serve minha-sessao "Meu Mac" "$PWD" --frontmost
-```
+---
 
-O `serve` cria identidade, ECDH e token local no Keychain e fica em foreground. O token não é impresso. Em outro terminal, informe só a sessão; o CLI recupera o token automaticamente do Keychain:
+## Contribuindo
 
-```bash
-export RELAY_SESSION_ID=minha-sessao
-./relay share
-./relay status
-./relay devices
-./relay stop
-```
+1. Fork o repositório  
+2. Crie uma branch: `git checkout -b feat/minha-ideia`  
+3. Faça commits claros  
+4. Abra um **Pull Request** descrevendo o que mudou e como testar  
 
-### Cloudflare Tunnel (Marco 4.1)
+Sugestões bem-vindas: multi-CLI, UX mobile, helper de captura, docs, testes.
 
-Habilite no setup (o token pode vir de `RELAY_TUNNEL_TOKEN`):
+Por enquanto não há `CONTRIBUTING.md` formal — PRs pequenos e testáveis ajudam a revisar mais rápido.
 
-```bash
-export RELAY_TUNNEL_TOKEN="<seu-token-do-cloudflare-tunnel>"
-./relay setup minha-sessao "Meu Mac" "$PWD" --tunnel-enabled --tunnel-name relay-diego --tunnel-hostname relay.kbtech.com.br
-./relay share   # inicia o tunnel automaticamente se configurado
-./relay status  # mostra estado do tunnel em tunnel.*
-./relay stop    # encerra agente + tunnel
-```
+---
 
-Sem `cloudflared` instalado, `share` imprime um aviso claro em vez de falhar.
+## Licença
 
-`RELAY_LOCAL_TOKEN` ainda existe como override explícito para testes. O uso normal não precisa dele.
+Distribuído sob a **GNU General Public License v3.0 (GPL-3.0)**.
 
-`share` detecta `CODEX_THREAD_ID` e `MAESTRI_TERMINAL_ID` quando `RELAY_SESSION_ID` não foi definido, envia metadata local autenticada antes da oferta, e emite envelope assinado, payload textual e PNG QR local one-time. Use `--pid` ou `RELAY_TARGET_PID` para informar o processo alvo; sem isso, o default seguro é o processo pai do CLI.
+Isso significa, em resumo:
 
-## Pareamento PWA
+- você pode usar, estudar, modificar e redistribuir;
+- se **distribuir** uma versão modificada (ou um programa que incorpore este código de forma que a GPL se aplique), em geral precisa **abrir o código** sob GPL-3.0 também;
+- o software é oferecido **sem garantias**.
 
-A PWA servida pelo agente aceita somente envelope assinado real. O navegador:
+Texto completo: [LICENSE](./LICENSE).
 
-- valida assinatura ECDSA P-256 da oferta e fingerprint do host;
-- gera chaves ECDSA P-256 e ECDH P-256 via WebCrypto;
-- persiste chaves privadas nao extraiveis em IndexedDB;
-- envia apenas chaves publicas e assinatura do desafio `relay-pair-v1`;
-- deriva a chave de sessao via ECDH P-256 + HKDF-SHA256.
-- guarda a chave AES da sessao por `host_id + session_id`, não globalmente.
+---
 
-Antes de autenticar, a PWA consulta apenas `/health`; nao mostra sessao, cwd, devices ou metadados.
+## Aviso
 
-## Endpoints
-
-- Publico minimo: `GET /health`.
-- Local admin: `POST /api/offer`, `POST /api/metadata`, `POST /api/revoke`, `POST /api/stop`.
-- Autenticados por local token ou lease: `GET /api/status`, `GET /api/devices`, `GET /api/sessions`, `GET /api/sessions/{id}`.
-- Lease: `POST /api/lease/release`, `GET /api/read?path=...`.
-- Comandos CLI: `relay serve` (daemon foreground), `relay share` (auto-start + QR), `relay setup` (configuração inicial).
-- Codex (lease, requer sessão com `codexThreadId`): `POST /api/sessions/{id}/turn`, `POST /api/sessions/{id}/interrupt`, `GET /api/sessions/{id}/events`, `GET /api/sessions/{id}/approvals`, `POST /api/sessions/{id}/approvals/{approvalId}`.
-- WebRTC signaling (lease): `POST /api/webrtc/offer`, `POST /api/webrtc/answer`, `POST /api/webrtc/ice`, `GET /api/webrtc/status`.
-
-## Transporte WebRTC
-
-- PeerConnection por lease com DataChannels `relay-control`, `relay-clipboard`, `relay-files`.
-- Mensagens cifradas com AES-256-GCM: AAD inclui `label + device_id + session_id + channel_id`; nonce 12 bytes; replay guard por sequência.
-- Vídeo H.264 baseline/main via VideoToolbox; resolução 720p/30 default, resize até 1080p.
-- STUN default seguro (`stun:stun.cloudflare.com:3478`, `stun:stun.l.google.com:19302`) para descoberta de candidatos na LAN/WAN. TURN real fica para Marco 4.
-- Interfaces `ICEProvider`/`TURNProvider` permitem substituir configuração futuramente.
-
-## IPC Go ↔ Helper Swift
-
-- Unix domain socket em diretório seguro `0700`, path exposto em `/api/webrtc/status`.
-- Framing binário: `[4 bytes length][1 byte type][payload]`.
-- Handshake com nonce 16 bytes + HMAC-SHA256 do segredo compartilhado (no Keychain).
-- Helper envia H264 NAL/access units e geometry; Go envia eventos input/clipboard.
-
-## Marco 3 — Fechado
-
-Transporte visual/controle local completo: WebRTC + DataChannels cifrados + IPC Go↔helper + STUN default. Pronto para uso local entre Mac e celular na mesma LAN.
-
-## Marco 4.1 — Cloudflare Tunnel (scaffold)
-
-- `internal/tunnel` com `Manager` real/fake (`Start`, `Stop`, `Status`).
-- Default: nome `relay-diego`, hostname `relay.kbtech.com.br`, URL `http://127.0.0.1:24109`.
-- Token via `RELAY_TUNNEL_TOKEN`, env ou preferência salva no Keychain.
-- Erros claros quando `cloudflared` ou token estão ausentes.
-- CLI `setup` grava preferências; `share` inicia tunnel se configurado; `status` expõe estado; `stop` encerra agente + tunnel.
-- Testes unitários com runner fake; `go test ./...` e `-race` passam.
-
-## Marco 4.2 — Adapter Codex
-
-- `internal/codex`: JSON-RPC 2.0 client com transporte injetável (`stdio`, Unix socket) e `FakeTransport` para testes.
-- Métodos implementados: `initialize`, `thread/resume`, `turn/start`, `turn/interrupt`.
-- Aprovações: `item/commandExecution/requestApproval` → `accept`/`decline` (MVP, sem `acceptForSession`).
-- Eventos normalizados em `status`, `timeline`, `error`, `approval`; resume busy vira `waiting_local`.
-- Transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`).
-- Endpoints de lease no agente Codex e PWA com envio/interrupção real e aprovações via polling.
-- CLI `relay share` auto-inicia agente em background e gera QR sem precisar `setup` primeiro.
-- Comando `relay serve` sobe agente em foreground; `make install` copia binário para `~/.local/bin`.
-
-## Marco 4 — Próximos passos
-
-- TURN real (`ShortLivedTURNProvider` já é stub).
-- Transferência de arquivos e aceite real no iPhone.
-- Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado.
+Software experimental (“as is”). Use por sua conta e risco. Não envie dados sensíveis por redes não confiáveis.

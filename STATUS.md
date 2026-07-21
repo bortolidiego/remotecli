@@ -35,15 +35,19 @@ Sessão Codex de origem: `019f7c05-24b5-7a40-8909-61c17c41c07a`
   - transporte real via `RELAY_CODEX_TRANSPORT` (`stdio` default, `socket` para `~/.codex/ipc/ipc.sock`)
   - endpoints de lease no agente: `/api/sessions/{id}/turn`, `/interrupt`, `/events`, `/approvals`, `/approvals/{id}`
   - PWA: envio/interrupção real, modal de aprovação com Permitir/Negar e polling de aprovações/eventos
-  - CLI `relay share` auto-inicia agente em background e gera QR sem precisar `setup` primeiro
-  - comando `relay serve` sobe agente em foreground; `make install` copia binário para `~/.local/bin`
+  - CLI renomeado para `remotecli` (comandos `relay` e `here` principais)
+  - `remotecli relay` auto-inicia agente em background e gera QR sem precisar `setup` primeiro
+  - `remotecli here` registra o terminal atual na lista do celular sem gerar QR se já pareado
+  - múltiplos CLIs no mesmo Mac aparecem como itens separados na PWA (1 QR por Mac, N terminais)
+  - `remotecli share` é alias legado oculto
+  - comando `remotecli serve` sobe agente em foreground; `make install` copia binário `remotecli` para `~/.local/bin` e mantém symlink `relay`
   - `go test ./...`, `go test -race ./...` e `npm test -- --run` passam
 
 ## O que fica pro Marco 4
 
 - TURN real (`ShortLivedTURNProvider` já existe como stub)
 - Transferência de arquivos/aceite real no iPhone
-- Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado
+- Rebrand visual/CLI de “Relay” → “Remote CliControl” quando autorizado (parcial: CLI já renomeado para `remotecli`)
 
 ## Bloqueios
 
@@ -62,9 +66,10 @@ Rodado no Mac com agente local `127.0.0.1:24109` + Codex App Server real (`ipc.s
 
 | Passo | Resultado |
 |---|---|
-| `relay setup` | OK — agente sobe, token no Keychain |
+| `remotecli setup` | OK — agente sobe, token no Keychain |
 | `GET /health` | OK — sem metadados privados |
-| `relay share` | OK — envelope + QR one-time |
+| `remotecli relay` | OK — QR URL para o celular escanear |
+| `remotecli here` | OK — registra terminal sem QR se já pareado |
 | `GET /api/status` sem token | 401 |
 | Sessão com `codexThreadId` | OK |
 | `POST .../turn` | OK — `thread/resume` + `turn/started` + `turn/completed` no app-server real |
@@ -75,6 +80,47 @@ Rodado no Mac com agente local `127.0.0.1:24109` + Codex App Server real (`ipc.s
 | Tunnel Cloudflare | não exercitado (sem token) |
 
 Agente de smoke pode ser parado com `./relay stop` na sessão correspondente.
+
+## Multi-CLI (2026-07-20)
+
+- Registry Go armazena N sessões (`cliSessions`) com chave estável (`session_key || nativeSessionId`), sem misturar com dispositivos emparelhados.
+- `POST /api/metadata` faz upsert; segundo `remotecli here` não apaga o primeiro.
+- Título derivado: env `Title` > Codex > Maestri > basename(cwd) > nativeSessionId > "Terminal".
+- TTL de 2h remove sessões sem heartbeat; após 5min sem update vira `offline`.
+- PWA: lista sempre visível quando pareada (mesmo que 1 item), polling a cada 3s, badge de harness, cwd curto e empty state claro.
+- Testes: `TestMetadataEndpointUpdatesSessionDescriptor` cobre 2 POSTs e upsert; `go test ./internal/pairing/... ./internal/agent/...` passa.
+
+### Como testar
+
+```sh
+# terminal 1
+remotecli relay          # QR se ainda não pareado
+# terminal 2 (outro cwd ou MAESTRI_TERMINAL_ID)
+remotecli here
+# terminal 3
+CODEX_THREAD_ID=fake remotecli here
+# terminal 4 (sessionID diferente)
+RELAY_SESSION_ID=cli-beta remotecli here
+# validar via curl com local token (único por host):
+TOKEN=$(security find-generic-password -s relay-local-token -a host -w)
+curl -sk https://127.0.0.1:24109/api/sessions -H "X-Relay-Local-Token: $TOKEN"
+```
+
+PWA após parear: lista com N itens; tocar muda o detalhe.
+
+### UX Digitar primeiro (2026-07-20)
+
+- Tocar numa sessão entra no detalhe com ação primária **Digitar / Enviar**, não tela preta.
+- Sessão Codex: aba "Chat" padrão — textarea grande, Enviar (startTurn), Parar, eventos recentes.
+- Sessão native/Maestri: textarea "Escreva e envie pro terminal do Mac" → cola no Mac e aperta Enter via data channel.
+- Aba "Tela" fica secundária, com placeholder honesto de vídeo em construção.
+- Testes web passam; build gera novo `internal/web/dist`.
+
+### Hotfix token único por host
+
+- Token local agora usa conta fixa `host` no Keychain, não `host-{sessionID}`.
+- Fallback: `host` → `host-{sessionID}` → `host-default`.
+- Isso permite `RELAY_SESSION_ID=cli-alpha here` e `RELAY_SESSION_ID=cli-beta here` no mesmo agente sem erro "outra sessão".
 
 ## UX Janela-first (2026-07-20)
 
