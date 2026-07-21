@@ -608,7 +608,10 @@ export default function App() {
     setEvents([])
     setMessage(null)
     setTerminalMirror({ text: '' })
-    setTerminalOpen(false)
+    setShowRawSafety(false)
+    setRawOpen(false)
+    lastChatReplyRef.current = ''
+    lastUserTextRef.current = ''
     setPendingAttachments([])
   }
 
