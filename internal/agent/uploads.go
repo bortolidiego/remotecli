@@ -12,8 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/bortolidiego/relay/shared/contracts"
 )
 
 const maxUploadSize = 15 << 20 // 15MB
@@ -176,8 +174,7 @@ func (a *Agent) handleSessionUpload(w http.ResponseWriter, r *http.Request, sess
 	}
 
 	// Não injeta na sessão aqui: o PWA manda UMA mensagem (texto + caminhos).
-	// Evita duplicar "[anexo]" + pergunta e perde a resposta no celular.
-	_ = sess
+	_ = sess // sessão validada acima
 
 	writeJSON(w, http.StatusOK, record)
 }
