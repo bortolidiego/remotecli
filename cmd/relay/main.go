@@ -377,26 +377,27 @@ func runSyncSession(s SyncFlags, mode syncMode) error {
 	}
 
 	// Banner de modo de acesso (LAN / tunnel / hosted)
-	if acc, err := loadAccessConfig(store); err == nil {
-		printAccessBanner(acc)
-	} else {
-		printAccessBanner(tunnel.DefaultConfig())
+	accCfg, accErr := loadAccessConfig(store)
+	if accErr != nil {
+		accCfg = tunnel.DefaultConfig()
 	}
+	printAccessBanner(accCfg)
 
-	if !s.NoTunnel {
+	// Tunnel só sobe no modo tunnel. Em LAN/hosted não chama a API (evita 400 sem token).
+	if !s.NoTunnel && accCfg.AccessMode() == tunnel.ModeTunnel {
 		if err := requestTunnelStart(cAddr, token); err != nil {
 			if errors.Is(err, tunnel.ErrCloudflaredMissing) {
 				fmt.Fprintf(os.Stderr, "Aviso: cloudflared não encontrado. Tunnel não iniciado.\n")
 				fmt.Fprintf(os.Stderr, "  brew install cloudflared\n")
-			} else if errors.Is(err, tunnel.ErrTokenMissing) {
+			} else if errors.Is(err, tunnel.ErrTokenMissing) || strings.Contains(err.Error(), "token do Cloudflare Tunnel") {
 				fmt.Fprintf(os.Stderr, "Aviso: token do tunnel não configurado.\n")
 				fmt.Fprintf(os.Stderr, "  remotecli access tunnel --token SEU_TOKEN\n")
 			} else if errors.Is(err, tunnel.ErrTunnelDisabled) || isAgentTunnelDisabled(err) {
-				// LAN: silencioso
+				// desabilitado: silencioso
 			} else {
 				return err
 			}
-		} else if acc, err := loadAccessConfig(store); err == nil && acc.AccessMode() == tunnel.ModeTunnel {
+		} else {
 			fmt.Println("Tunnel Cloudflare: pedido de start enviado ao agente.")
 		}
 	}
@@ -928,6 +929,17 @@ func printAccessBanner(cfg tunnel.Config) {
 func requestTunnelStart(addr, token string) error {
 	body, err := postAgent(addr, "/api/tunnel/start", nil, token)
 	if err != nil {
+		// postAgent inclui o body no erro em 4xx — classifica sem falhar o here/relay.
+		msg := err.Error()
+		if strings.Contains(msg, "token do Cloudflare Tunnel") {
+			return tunnel.ErrTokenMissing
+		}
+		if strings.Contains(msg, "cloudflared não encontrado") {
+			return tunnel.ErrCloudflaredMissing
+		}
+		if strings.Contains(msg, "tunnel desabilitado") {
+			return tunnel.ErrTunnelDisabled
+		}
 		return fmt.Errorf("falha ao solicitar início do tunnel: %w", err)
 	}
 	var resp struct {
@@ -943,6 +955,9 @@ func requestTunnelStart(addr, token string) error {
 		}
 		if strings.Contains(resp.Error, "cloudflared não encontrado") {
 			return tunnel.ErrCloudflaredMissing
+		}
+		if strings.Contains(resp.Error, "tunnel desabilitado") {
+			return tunnel.ErrTunnelDisabled
 		}
 		return errors.New(resp.Error)
 	}
