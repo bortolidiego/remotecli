@@ -338,6 +338,13 @@ button:disabled {
   -webkit-overflow-scrolling: touch;
 }
 
+.chat-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 48px 16px 24px;
+}
+
 /* chat-intro removido — app de produção, sem copy de mockup */
 
 .msg-row {
@@ -849,22 +856,15 @@ button:disabled {
   color: var(--text);
 }
 
-/* Terminal — painel grande (screenshot inicial da sessão) */
+/* Raw terminal — discreto, fechado; o chat são as bolhas */
 .terminal-panel {
-  margin: 0 0 12px;
-  border-radius: 16px;
+  margin: 12px 0 8px;
+  border-radius: 12px;
   background: #0c0c0b;
   border: 1px solid var(--border);
   overflow: hidden;
-  min-height: 42vh;
-}
-
-.terminal-panel.open {
-  min-height: 42vh;
-}
-
-.terminal-panel:not(.open) {
   min-height: 0;
+  opacity: 0.85;
 }
 
 .terminal-toggle {
@@ -872,33 +872,27 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 14px;
+  padding: 8px 12px;
   background: transparent;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
   text-align: left;
-  border-bottom: 1px solid transparent;
-}
-
-.terminal-panel.open .terminal-toggle {
-  border-bottom-color: var(--border);
 }
 
 .terminal-body {
   margin: 0;
-  padding: 14px 16px 20px;
+  padding: 10px 12px 14px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: #c8c6bf;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #9a9890;
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: calc(42vh - 48px);
-  max-height: 55vh;
+  max-height: 28vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  border-top: 1px solid var(--border);
 }
 
 .tabs-row {

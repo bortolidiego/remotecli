@@ -71,11 +71,12 @@ export default function App() {
   const [scannedOffer, setScannedOffer] = useState('')
   const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
   const [terminalMirror, setTerminalMirror] = useState<{ text: string; source?: string; updatedAt?: string }>({ text: '' })
-  const [terminalOpen, setTerminalOpen] = useState(true) // painel grande aberto por padrão
+  const [terminalOpen, setTerminalOpen] = useState(false) // fechado: chat limpo tipo Claude
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
+  const lastChatReplyRef = useRef('')
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(
     () => (pairState ? { deviceId: pairState.deviceId, leaseToken: pairState.leaseToken } : null),
@@ -218,18 +219,33 @@ export default function App() {
       try {
         const snap = await fetchSessionOutput(sessionId, currentAuth)
         if (!active) return
-        if (snap.text || snap.updated_at) {
+        const raw = snap.text || ''
+        if (raw || snap.updated_at) {
           setTerminalMirror((prev) => {
-            if (prev.text === snap.text && prev.updatedAt === snap.updated_at) return prev
-            return { text: snap.text || '', source: snap.source, updatedAt: snap.updated_at }
+            if (prev.text === raw && prev.updatedAt === snap.updated_at) return prev
+            return { text: raw, source: snap.source, updatedAt: snap.updated_at }
           })
+          // Espelha resposta limpa no chat (sem dump TUI)
+          const reply = extractAssistantReply(raw)
+          if (
+            reply &&
+            reply !== lastChatReplyRef.current &&
+            !isPlaceholderReply(reply) &&
+            reply.length > 25
+          ) {
+            lastChatReplyRef.current = reply
+            setLocalLog((log) => {
+              if (log.some((m) => m.role === 'assistant' && m.text === reply)) return log
+              return [...log, { id: `a-${Date.now()}`, role: 'assistant', text: reply.slice(0, 6000) }]
+            })
+          }
         }
-      } catch (err) {
-        // Silencioso: o mirror não deve poluir com erros transitórios.
+      } catch {
+        // silencioso
       }
     }
     void tick()
-    const id = setInterval(tick, 2500)
+    const id = setInterval(tick, 1200)
     return () => {
       active = false
       clearInterval(id)
@@ -400,58 +416,52 @@ export default function App() {
     }
   }
 
-  /** Envia na hora (não trava 90s). Resposta chega via poll em background. */
+  /** Uma mensagem só (texto + anexos). Composer libera na hora; resposta via poll. */
   async function sendToSession() {
     if (!auth || !selectedId || (!promptText.trim() && pendingAttachments.length === 0) || busy) return
     const text = promptText.trim()
-    const caption = text || undefined
     const currentAuth = auth
     const sessionId = selectedId
     setBusy(true)
     setMessage(null)
 
-    const uploaded = await uploadAndSendAttachments(sessionId, currentAuth, caption)
-    const userText = text || (uploaded.length > 0 ? '' : '')
+    // Upload só salva arquivos (sem injetar no Mac ainda)
+    const uploaded = await uploadAndSendAttachments(sessionId, currentAuth, '')
+    const parts: string[] = []
+    for (const att of uploaded) {
+      const path = att.path || att.name
+      parts.push(`[anexo] ${att.name}${path ? ` (${path})` : ''}`)
+    }
+    if (text) parts.push(text)
+    const payload = parts.join('\n')
+    if (!payload) {
+      setBusy(false)
+      return
+    }
+
     setLocalLog((log) => [
       ...log,
       {
         id: `u-${Date.now()}`,
         role: 'user',
-        text: userText,
+        text: text || (uploaded.length ? uploaded.map((a) => a.name).join(', ') : ''),
         attachments: uploaded,
       },
     ])
     setPromptText('')
     clearPendingAttachments()
 
-    if (!text) {
-      setBusy(false)
-      return
-    }
+    // Snapshot baseline antes do envio
+    const baseline = await fetchSessionOutput(sessionId, currentAuth)
+      .then((s) => s.text || '')
+      .catch(() => '')
+    lastChatReplyRef.current = extractAssistantReply(baseline)
 
     try {
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 15_000)
-      const res = await sendSessionMessage(sessionId, text, currentAuth, controller.signal)
+      const timeout = setTimeout(() => controller.abort(), 12_000)
+      await sendSessionMessage(sessionId, payload, currentAuth, controller.signal)
       clearTimeout(timeout)
-      const reply = extractAssistantReply(res.reply || '')
-      const isStatusOnly =
-        !reply ||
-        reply.startsWith('Mensagem enviada') ||
-        reply.startsWith('Mensagem a caminho') ||
-        reply.startsWith('Mensagem digitada') ||
-        reply.startsWith('Aguardando') ||
-        reply.includes('ainda não espelhada') ||
-        reply.includes('Ver terminal se quiser o raw') ||
-        res.mode === 'delivered' ||
-        res.mode === 'session_type' ||
-        res.mode === 'phone_bridge'
-
-      if (!isStatusOnly) {
-        setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: reply }])
-        setBusy(false)
-        return
-      }
     } catch (err) {
       if (!(err instanceof Error && err.name === 'AbortError')) {
         setMessage(String(err))
@@ -460,40 +470,38 @@ export default function App() {
       setBusy(false)
     }
 
-    // Poll rápido em background — não bloqueia o composer
-    void (async () => {
-      const before = await fetchSessionOutput(sessionId, currentAuth)
-        .then((s) => extractAssistantReply(cleanMirrorText(s.text || '')))
-        .catch(() => '')
-      let last = before
-      const deadline = Date.now() + 120_000
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 900))
-        const snap = await fetchSessionOutput(sessionId, currentAuth).catch(() => null)
-        const now = extractAssistantReply(cleanMirrorText(snap?.text || ''))
-        if (
-          now &&
-          now !== last &&
-          substantialChange(last, now) &&
-          !now.toLowerCase().includes('no connection') &&
-          !now.includes('Ver terminal se quiser o raw')
-        ) {
-          setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 4000) }])
-          return
-        }
-        if (now) last = now
+    // Poll agressivo até achar resposta limpa
+    void pollForAssistantReply(sessionId, currentAuth, lastChatReplyRef.current)
+  }
+
+  async function pollForAssistantReply(
+    sessionId: string,
+    currentAuth: LeaseAuth | string,
+    beforeReply: string,
+  ) {
+    const deadline = Date.now() + 150_000
+    let lastRaw = ''
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 700))
+      const snap = await fetchSessionOutput(sessionId, currentAuth).catch(() => null)
+      const raw = snap?.text || ''
+      if (!raw || raw === lastRaw) continue
+      lastRaw = raw
+      setTerminalMirror({ text: raw, source: snap?.source, updatedAt: snap?.updated_at })
+      const now = extractAssistantReply(raw)
+      if (!now || isPlaceholderReply(now)) continue
+      if (now === beforeReply || now === lastChatReplyRef.current) continue
+      // Aceita se mudou de forma clara ou cresceu
+      if (beforeReply && now.length < beforeReply.length + 15 && now.includes(beforeReply.slice(0, 40))) {
+        continue
       }
-    })()
-  }
-
-  function cleanMirrorText(s: string): string {
-    return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+/g, ' ').trim()
-  }
-
-  function substantialChange(before: string, now: string): boolean {
-    if (before === '') return now.length > 20
-    if (now.length <= before.length) return now.length > 40
-    return now.length - before.length > 10
+      lastChatReplyRef.current = now
+      setLocalLog((log) => {
+        if (log.some((m) => m.role === 'assistant' && m.text === now)) return log
+        return [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 6000) }]
+      })
+      return
+    }
   }
 
   async function interruptCurrentTurn() {
@@ -754,7 +762,6 @@ export default function App() {
   // Session detail view
   const session = detail
   const hasCodex = Boolean(session?.codexThreadId)
-  const isMaestri = Boolean(session?.harness === 'maestri' || session?.maestri_agent_name)
   const linkLabel = rtcStateLabel(rtcState, dataChannelOpen)
   const canSend = promptText.trim().length > 0 || pendingAttachments.length > 0
 
@@ -804,23 +811,8 @@ export default function App() {
       {tab === 'digitar' ? (
         <div className="screen">
           <div className="chat-scroll" ref={chatScrollRef}>
-            {/* Terminal / contexto — grande, aberto por padrão (sem copy de mockup) */}
-            {(isMaestri || terminalMirror.text) && (
-              <div className={`terminal-panel ${terminalOpen ? 'open' : ''}`}>
-                <button
-                  type="button"
-                  className="terminal-toggle"
-                  onClick={() => setTerminalOpen((v) => !v)}
-                  aria-expanded={terminalOpen}
-                >
-                  <span>{terminalOpen ? '▾' : '▸'} Terminal</span>
-                </button>
-                {terminalOpen && (
-                  <pre className="terminal-body">
-                    {terminalMirror.text || '…'}
-                  </pre>
-                )}
-              </div>
+            {localLog.length === 0 && (
+              <div className="chat-empty">Envie uma mensagem</div>
             )}
 
             {localLog.map((msg) => (
@@ -858,6 +850,21 @@ export default function App() {
                     {ev.text || ev.status || ''}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Terminal bruto opcional (fechado) — não é o chat */}
+            {terminalMirror.text && (
+              <div className={`terminal-panel ${terminalOpen ? 'open' : ''}`}>
+                <button
+                  type="button"
+                  className="terminal-toggle"
+                  onClick={() => setTerminalOpen((v) => !v)}
+                  aria-expanded={terminalOpen}
+                >
+                  <span>{terminalOpen ? '▾' : '▸'} Raw (opcional)</span>
+                </button>
+                {terminalOpen && <pre className="terminal-body">{terminalMirror.text}</pre>}
               </div>
             )}
           </div>
@@ -1034,23 +1041,48 @@ export default function App() {
   )
 }
 
+function isPlaceholderReply(s: string): boolean {
+  if (!s) return true
+  const lower = s.toLowerCase()
+  return (
+    lower.includes('ver terminal se quiser') ||
+    lower.startsWith('mensagem enviada') ||
+    lower.startsWith('mensagem digitada') ||
+    lower.includes('ainda não espelhada') ||
+    lower.includes('no connection')
+  )
+}
+
+/** Extrai texto útil da saída do terminal (sem TUI, sem “Resposta no Mac”). */
 function extractAssistantReply(raw: string): string {
   if (!raw) return ''
-  const lines = raw.split('\n')
+  // Mantém quebras de linha (antes colapsava tudo e quebrava o extrator)
+  const cleaned = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+  const lines = cleaned.split(/\r?\n/)
   const out: string[] = []
   for (const line of lines) {
     const trimmed = line.trim()
-    if (!trimmed) continue
+    if (!trimmed) {
+      if (out.length > 0 && out[out.length - 1] !== '') out.push('')
+      continue
+    }
     if (isTUINoiseLine(trimmed)) continue
     out.push(trimmed)
   }
-  if (out.length === 0) return 'Resposta no Mac — toque Ver terminal se quiser o raw'
-  // Preferência por frases curtas de confirmação no início.
+  while (out.length && out[out.length - 1] === '') out.pop()
+  if (out.length === 0) return ''
+
+  // Preferir o trecho final (resposta mais recente)
+  const joined = out.join('\n').trim()
   const human = out.filter(looksHumanReply)
-  if (human.length > 0) return human.slice(0, 4).join('\n')
-  const joined = out.slice(0, 12).join('\n')
-  if (joined.length < 30 && !looksHumanReply(joined)) return 'Resposta no Mac — toque Ver terminal se quiser o raw'
-  return joined.slice(0, 4000)
+  if (human.length >= 2) {
+    // Últimos blocos humanos costumam ser a resposta
+    return human.slice(-12).join('\n').slice(0, 6000)
+  }
+  if (human.length === 1 && human[0].length > 20) return human[0].slice(0, 6000)
+  if (joined.length < 20) return ''
+  // Últimas ~40 linhas limpas
+  return out.slice(-40).join('\n').slice(0, 6000)
 }
 
 function isTUINoiseLine(s: string): boolean {
@@ -1069,14 +1101,23 @@ function isTUINoiseLine(s: string): boolean {
     'context:',
     'total tokens',
     'completion tokens',
+    'worked for',
+    'format:',
+    'dimensions:',
+    'size:',
+    'path:',
+    'image #',
+    'ctrl+',
+    'weekly limit',
   ]
   for (const prefix of prefixes) {
     if (lower.startsWith(prefix)) return true
   }
-  if (lower.includes('149k / 500k')) return true
-  if (lower.includes('hooks') && lower.includes('ms')) return true
+  if (lower.includes('hooks:') && lower.includes('[')) return true
   if (/\d+\s*[km]?\s*\/\s*\d+\s*[km]?/.test(s)) return true
   if (s.startsWith('~/.maestri') || s.includes('/.maestri/')) return true
+  if (s.includes('Grok 4.5') || s.includes('always-approve')) return true
+  if (/^\[hooks/i.test(s)) return true
   if (s.startsWith('/') && s.split(' ').length === 1 && s.length < 80) return true
   return false
 }

@@ -175,15 +175,9 @@ func (a *Agent) handleSessionUpload(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 
-	// Envia mensagem à sessão para o agente no Mac "ver" o arquivo.
-	caption := record.Caption
-	if caption == "" && !strings.HasPrefix(mimeType, "image/") {
-		caption = "[arquivo anexado]"
-	}
-	msgText := formatAttachmentMessage(record.Name, localPath, caption)
-	go func(s contracts.SessionDescriptor, text string) {
-		_, _, _ = a.deliverToSession(s, text)
-	}(sess, msgText)
+	// Não injeta na sessão aqui: o PWA manda UMA mensagem (texto + caminhos).
+	// Evita duplicar "[anexo]" + pergunta e perde a resposta no celular.
+	_ = sess
 
 	writeJSON(w, http.StatusOK, record)
 }
