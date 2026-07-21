@@ -1,4 +1,4 @@
-import type { AgentStatus, AuthenticatedStatus, Capability, CodexApproval, CodexEvent, PairResponse, SessionDescriptor, SignedEnvelope } from '../types/api'
+import type { AgentStatus, Attachment, AuthenticatedStatus, Capability, CodexApproval, CodexEvent, PairResponse, SessionDescriptor, SignedEnvelope } from '../types/api'
 
 const API_PREFIX = '/api'
 const DB_NAME = 'relay-keys-v1'
@@ -75,6 +75,61 @@ export async function fetchSessionOutput(
   auth: LeaseAuth | string,
 ): Promise<{ text: string; source?: string; name?: string; updated_at?: string }> {
   return api(`/sessions/${encodeURIComponent(sessionId)}/output`, {}, auth)
+}
+
+export async function uploadSessionFile(
+  sessionId: string,
+  file: File,
+  caption: string,
+  auth: LeaseAuth | string,
+): Promise<Attachment> {
+  const form = new FormData()
+  form.append('file', file)
+  if (caption) form.append('caption', caption)
+
+  const headers = authHeaders(auth)
+  headers.delete('Accept')
+
+  const res = await fetch(`${API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/upload`, {
+    method: 'POST',
+    body: form,
+    headers,
+    credentials: 'same-origin',
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`${res.status}: ${text}`)
+  }
+  return res.json() as Promise<Attachment>
+}
+
+export async function openSessionFile(
+  sessionId: string,
+  fileId: string,
+  auth: LeaseAuth | string,
+): Promise<string> {
+  const headers = authHeaders(auth)
+  const res = await fetch(`${API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`, {
+    headers,
+    credentials: 'same-origin',
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`${res.status}: ${text}`)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
+}
+
+function authHeaders(auth: LeaseAuth | string): Headers {
+  const headers = new Headers()
+  if (typeof auth === 'string') {
+    headers.set('X-Relay-Local-Token', auth)
+  } else if (auth) {
+    headers.set('X-Relay-Device-ID', auth.deviceId)
+    headers.set('X-Relay-Lease-Token', auth.leaseToken)
+  }
+  return headers
 }
 
 export async function interruptTurn(sessionId: string, auth: LeaseAuth | string): Promise<{ status: string }> {

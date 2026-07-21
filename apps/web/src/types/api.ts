@@ -52,6 +52,16 @@ export interface SessionMessageResult {
   error?: string
 }
 
+export interface Attachment {
+  id: string
+  name: string
+  mime: string
+  size: number
+  url: string
+  path?: string
+  caption?: string
+}
+
 export interface AgentStatus {
   listening: boolean
   address: string

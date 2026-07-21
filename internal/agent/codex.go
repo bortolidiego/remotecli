@@ -131,6 +131,15 @@ func (a *Agent) handleSessionRoot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
 		return
 	}
+	if sub == "upload" || sub == "files" {
+		// /api/sessions/{id}/upload  ou  /api/sessions/{id}/files/{fileId}
+		extra := sub
+		if sub == "files" && len(parts) == 3 && parts[2] != "" {
+			extra = "files/" + parts[2]
+		}
+		a.handleUploadOrFiles(w, r, sessionID, extra)
+		return
+	}
 
 	http.NotFound(w, r)
 }

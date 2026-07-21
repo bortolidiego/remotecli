@@ -10,20 +10,40 @@ import {
   fetchStatus,
   getSessionKey,
   interruptTurn,
+  openSessionFile,
   pair,
   releaseLease,
   fetchSessionOutput,
   sendSessionMessage,
   startTurn,
+  uploadSessionFile,
   type LeaseAuth,
   type PairState,
 } from './api/client'
-import type { AgentStatus, AuthenticatedStatus, CodexApproval, CodexEvent, SessionDescriptor } from './types/api'
+import type { AgentStatus, Attachment, AuthenticatedStatus, CodexApproval, CodexEvent, SessionDescriptor } from './types/api'
 import { SignalingClient, type ConnectionState } from './webrtc/signaling'
 
 const STORED_PAIR = 'relay:pair-state'
 
+const ACCEPT_TYPES = 'image/*,.pdf,.txt,.md,.json,.csv,.png,.jpg,.jpeg,.webp,.gif'
+
+const MAX_ATTACHMENT_SIZE = 15 << 20
+
 type View = 'list' | 'session'
+
+type PendingAttachment = Attachment & {
+  file: File
+  previewUrl?: string
+  uploading?: boolean
+}
+
+type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  attachments?: Attachment[]
+  isFallback?: boolean
+}
 
 export default function App() {
   const [health, setHealth] = useState<AgentStatus | null>(null)
@@ -47,15 +67,30 @@ export default function App() {
   const [target, setTarget] = useState<'window' | 'display'>('display')
   const [fullScreen, setFullScreen] = useState(false)
   const [promptText, setPromptText] = useState('')
-  const [localLog, setLocalLog] = useState<{ id: string; role: 'user' | 'assistant'; text: string }[]>([])
+  const [localLog, setLocalLog] = useState<ChatMessage[]>([])
   const [scannedOffer, setScannedOffer] = useState('')
   const [tab, setTab] = useState<'digitar' | 'tela'>('digitar')
   const [terminalMirror, setTerminalMirror] = useState<{ text: string; source?: string; updatedAt?: string }>({ text: '' })
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([])
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const signalingRef = useRef<SignalingClient | null>(null)
   const auth = useMemo<LeaseAuth | null>(
     () => (pairState ? { deviceId: pairState.deviceId, leaseToken: pairState.leaseToken } : null),
     [pairState],
   )
+
+  const scrollToBottom = useCallback(() => {
+    const el = chatScrollRef.current
+    if (el && typeof el.scrollTo === 'function') {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }
+  }, [])
+
+  useEffect(() => {
+    scrollToBottom()
+  }, [localLog, scrollToBottom])
 
   useEffect(() => {
     if (pairState) return
@@ -173,7 +208,6 @@ export default function App() {
       .catch((err) => setMessage(String(err)))
   }, [auth, selectedId])
 
-  // Espelho ao vivo do terminal para sessões maestri (aba Digitar).
   useEffect(() => {
     if (!auth || !selectedId || view !== 'session' || tab !== 'digitar') return
     const sessionId = selectedId
@@ -268,15 +302,96 @@ export default function App() {
     }
   }, [auth, pairState])
 
+  function addPendingAttachment(file: File) {
+    if (file.size > MAX_ATTACHMENT_SIZE) {
+      setMessage(`Arquivo muito grande: ${file.name} (máx 15MB)`)
+      return
+    }
+    const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+    const att: PendingAttachment = {
+      id,
+      name: file.name,
+      mime: file.type || 'application/octet-stream',
+      size: file.size,
+      url: '',
+      file,
+      previewUrl,
+    }
+    setPendingAttachments((prev) => [...prev, att])
+  }
+
+  function removePendingAttachment(id: string) {
+    setPendingAttachments((prev) => {
+      const found = prev.find((a) => a.id === id)
+      if (found?.previewUrl) URL.revokeObjectURL(found.previewUrl)
+      return prev.filter((a) => a.id !== id)
+    })
+  }
+
+  function clearPendingAttachments() {
+    setPendingAttachments((prev) => {
+      prev.forEach((a) => {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl)
+      })
+      return []
+    })
+  }
+
+  function handlePaste(e: React.ClipboardEvent) {
+    const items = e.clipboardData?.items
+    if (!items) return
+    let foundImage = false
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) {
+          addPendingAttachment(file)
+          foundImage = true
+        }
+      }
+    }
+    if (foundImage) {
+      e.preventDefault()
+    }
+  }
+
+  async function uploadAndSendAttachments(sessionId: string, currentAuth: LeaseAuth | string, caption?: string) {
+    const files = pendingAttachments.filter((a) => a.file && !a.uploading)
+    if (files.length === 0) return []
+    setPendingAttachments((prev) => prev.map((a) => (files.some((f) => f.id === a.id) ? { ...a, uploading: true } : a)))
+    const uploaded: Attachment[] = []
+    for (const att of files) {
+      try {
+        const rec = await uploadSessionFile(sessionId, att.file, caption || att.caption || '', currentAuth)
+        uploaded.push(rec)
+      } catch (err) {
+        setMessage(`Falha ao enviar ${att.name}: ${String(err)}`)
+      }
+    }
+    setPendingAttachments((prev) => prev.filter((a) => !files.some((f) => f.id === a.id)))
+    return uploaded
+  }
+
   async function sendTurn() {
-    if (!auth || !selectedId || !promptText.trim() || busy) return
+    if (!auth || !selectedId || (!promptText.trim() && pendingAttachments.length === 0) || busy) return
     const text = promptText.trim()
+    const caption = text || undefined
+    const currentAuth = auth
     setBusy(true)
     setMessage(null)
-    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text }])
+
+    const uploaded = await uploadAndSendAttachments(selectedId, currentAuth, caption)
+    const userText = text || (uploaded.length > 0 ? '[imagem anexada]' : '')
+    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text: userText, attachments: uploaded }])
     setPromptText('')
+    clearPendingAttachments()
     try {
-      await startTurn(selectedId, text, auth)
+      // Só texto vai para o turn; anexo já notificou a sessão no upload.
+      if (text) {
+        await startTurn(selectedId, text, currentAuth)
+      }
     } catch (err) {
       setMessage(String(err))
     } finally {
@@ -286,12 +401,25 @@ export default function App() {
 
   /** Envia e espera resposta real da sessão (ida e volta, tipo Claude). */
   async function sendToSession() {
-    if (!auth || !selectedId || !promptText.trim() || busy) return
+    if (!auth || !selectedId || (!promptText.trim() && pendingAttachments.length === 0) || busy) return
     const text = promptText.trim()
+    const caption = text || undefined
+    const currentAuth = auth
     setBusy(true)
     setMessage(null)
-    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text }])
+
+    const uploaded = await uploadAndSendAttachments(selectedId, currentAuth, caption)
+    const userText = text || (uploaded.length > 0 ? '[imagem anexada]' : '')
+    setLocalLog((log) => [...log, { id: `u-${Date.now()}`, role: 'user', text: userText, attachments: uploaded }])
     setPromptText('')
+    clearPendingAttachments()
+
+    // Só anexos: upload já entregou a mensagem no Mac — não POST message vazio.
+    if (!text) {
+      setBusy(false)
+      return
+    }
+
     setLocalLog((log) => [
       ...log,
       { id: `a-${Date.now()}-wait`, role: 'assistant', text: 'Enviado. Aguardando resposta da sessão…' },
@@ -300,45 +428,38 @@ export default function App() {
     try {
       controller = new AbortController()
       const timeout = setTimeout(() => controller?.abort(), 120_000)
-      // Pode demorar: no orquestrador o bridge espera o agente responder (até ~90s)
-      const res = await sendSessionMessage(selectedId, text, auth, controller.signal)
+      const res = await sendSessionMessage(selectedId, text, currentAuth, controller.signal)
       clearTimeout(timeout)
-      const reply = (res.reply || '').trim()
+      const reply = extractAssistantReply(res.reply || '')
       const isStatusOnly =
         !reply ||
         reply.startsWith('Mensagem enviada') ||
         reply.startsWith('Mensagem a caminho') ||
         reply.startsWith('Mensagem digitada') ||
         reply.startsWith('Aguardando') ||
-        reply.includes('ainda não espelhada')
+        reply.includes('ainda não espelhada') ||
+        reply.includes('Ver terminal se quiser o raw')
 
       setLocalLog((log) => {
         const base = log.filter((m) => !m.id.endsWith('-wait'))
         if (!isStatusOnly) {
           return [...base, { id: `a-${Date.now()}`, role: 'assistant', text: reply }]
         }
-        // Sem texto de resposta ainda — tenta espelhar o terminal
         return base
       })
 
       if (isStatusOnly) {
-        // poll output por um tempo, aceitando qualquer mudança substancial
-        const before = await fetchSessionOutput(selectedId, auth).then((s) => cleanMirrorText(s.text || '')).catch(() => '')
+        const before = await fetchSessionOutput(selectedId, currentAuth).then((s) => cleanMirrorText(s.text || '')).catch(() => '')
         const deadline = Date.now() + 90_000
         let last = before
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 2000))
-          const snap = await fetchSessionOutput(selectedId, auth).catch(() => null)
+          const snap = await fetchSessionOutput(selectedId, currentAuth).catch(() => null)
           const rawNow = snap?.text || ''
-          const now = cleanMirrorText(rawNow)
-          if (now && now !== last && substantialChange(last, now)) {
-            let delta = now
-            if (last && now.startsWith(last)) delta = now.slice(last.length)
-            delta = cleanMirrorText(delta)
-            if (delta.length > 20 && !delta.toLowerCase().includes('no connection')) {
-              setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: delta.slice(0, 4000) }])
-              return
-            }
+          const now = extractAssistantReply(cleanMirrorText(rawNow))
+          if (now && now !== last && substantialChange(last, now) && !now.toLowerCase().includes('no connection')) {
+            setLocalLog((log) => [...log, { id: `a-${Date.now()}`, role: 'assistant', text: now.slice(0, 4000) }])
+            return
           }
           last = now || last
         }
@@ -348,6 +469,7 @@ export default function App() {
             id: `a-${Date.now()}`,
             role: 'assistant',
             text: reply || 'Resposta ainda não espelhada no celular. Toque ↻ ou veja no Mac.',
+            isFallback: true,
           },
         ])
       }
@@ -469,6 +591,7 @@ export default function App() {
     setRtcState('idle')
     setSelectedApproval(null)
     setLocalLog([])
+    setPendingAttachments([])
     setMessage('Desconectado. Escaneie um QR novo no Mac.')
   }
 
@@ -480,6 +603,9 @@ export default function App() {
     setLocalLog([])
     setEvents([])
     setMessage(null)
+    setTerminalMirror({ text: '' })
+    setTerminalOpen(false)
+    setPendingAttachments([])
   }
 
   function backToList() {
@@ -488,6 +614,17 @@ export default function App() {
     setDetail(null)
     setLocalLog([])
     setPromptText('')
+    setPendingAttachments([])
+  }
+
+  async function handleOpenFile(att: Attachment) {
+    if (!auth || !selectedId) return
+    try {
+      const blobUrl = await openSessionFile(selectedId, att.id, auth)
+      window.open(blobUrl, '_blank')
+    } catch (err) {
+      setMessage(`Não foi possível abrir ${att.name}: ${String(err)}`)
+    }
   }
 
   if (offline) {
@@ -624,6 +761,7 @@ export default function App() {
   const hasCodex = Boolean(session?.codexThreadId)
   const isMaestri = Boolean(session?.harness === 'maestri' || session?.maestri_agent_name)
   const linkLabel = rtcStateLabel(rtcState, dataChannelOpen)
+  const canSend = promptText.trim().length > 0 || pendingAttachments.length > 0
 
   return (
     <Shell>
@@ -670,42 +808,56 @@ export default function App() {
 
       {tab === 'digitar' ? (
         <div className="screen">
-          <div className="chat-scroll">
+          <div className="chat-scroll" ref={chatScrollRef}>
             <div className="chat-intro">
-              {hasCodex ? (
-                <>
-                  Converse com o Codex deste terminal. As mensagens vão para a thread no Mac.
-                  <p className="muted">Pasta: {shortCwd(session?.cwd)}</p>
-                </>
-              ) : isMaestri ? (
-                <>
-                  Como no app Claude: digite aqui e a mensagem entra na sessão{' '}
-                  <strong>{session?.maestri_agent_name || sessionTitle(session!)}</strong>. No Mac a conversa continua de onde parou.
-                  <p className="muted">Pasta: {shortCwd(session?.cwd)}</p>
-                </>
-              ) : (
-                <>
-                  Digite e envie — a mensagem vai para esta sessão no Mac (como se você tivesse digitado).
-                  <p className="muted">
-                    Canal: {linkLabel}. Pasta: {shortCwd(session?.cwd)}
-                  </p>
-                </>
-              )}
+              {hasCodex
+                ? 'Converse com o Codex deste terminal.'
+                : isMaestri
+                  ? `Como no Claude: digite aqui para ${session?.maestri_agent_name || sessionTitle(session!)}.`
+                  : 'Digite e envie — a mensagem vai para esta sessão no Mac.'}
             </div>
 
             {isMaestri && terminalMirror.text && (
-              <div className="terminal-panel">
-                <div className="terminal-header">
-                  <span>Última saída do terminal</span>
+              <div className={`terminal-panel ${terminalOpen ? 'open' : ''}`}>
+                <button
+                  type="button"
+                  className="terminal-toggle"
+                  onClick={() => setTerminalOpen((v) => !v)}
+                  aria-expanded={terminalOpen}
+                >
+                  <span>{terminalOpen ? '▾' : '▸'} Ver terminal</span>
                   <span className="terminal-source">{terminalMirror.source || 'espelho'}</span>
-                </div>
-                <pre className="terminal-body">{terminalMirror.text}</pre>
+                </button>
+                {terminalOpen && (
+                  <pre className="terminal-body">{terminalMirror.text}</pre>
+                )}
               </div>
             )}
 
             {localLog.map((msg) => (
-              <div key={msg.id} className={`msg-row ${msg.role}`}>
-                <div className="msg-bubble">{msg.text}</div>
+              <div key={msg.id} className={`msg-row ${msg.role} ${msg.isFallback ? 'fallback' : ''}`}>
+                <div className="msg-bubble">
+                  {msg.text}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="attachment-strip">
+                      {msg.attachments.map((att) => (
+                        <button
+                          key={att.id}
+                          type="button"
+                          className="attachment-thumb"
+                          onClick={() => void handleOpenFile(att)}
+                          aria-label={att.name}
+                        >
+                          {att.mime.startsWith('image/') ? (
+                            <img src={att.url} alt={att.name} loading="lazy" />
+                          ) : (
+                            <span className="attachment-file">{att.name}</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             ))}
 
@@ -722,10 +874,33 @@ export default function App() {
           </div>
 
           <div className="composer-wrap">
+            {pendingAttachments.length > 0 && (
+              <div className="pending-attachments">
+                {pendingAttachments.map((att) => (
+                  <div key={att.id} className="pending-att">
+                    {att.previewUrl ? (
+                      <img src={att.previewUrl} alt={att.name} />
+                    ) : (
+                      <span className="pending-att-file">{att.name}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="pending-att-remove"
+                      onClick={() => removePendingAttachment(att.id)}
+                      aria-label={`Remover ${att.name}`}
+                    >
+                      ×
+                    </button>
+                    {att.uploading && <span className="pending-att-loading" />}
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="composer">
               <textarea
                 value={promptText}
                 onChange={(e) => setPromptText(e.target.value)}
+                onPaste={handlePaste}
                 placeholder={
                   hasCodex
                     ? 'Mensagem para o Codex…'
@@ -743,6 +918,27 @@ export default function App() {
                 }}
               />
               <div className="composer-actions">
+                <button
+                  type="button"
+                  className="composer-chip"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Anexar arquivo"
+                  title="Anexar arquivo"
+                >
+                  +
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ACCEPT_TYPES}
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const files = e.target.files
+                    if (!files) return
+                    for (let i = 0; i < files.length; i++) addPendingAttachment(files[i])
+                    e.target.value = ''
+                  }}
+                />
                 {hasCodex && (
                   <button
                     type="button"
@@ -759,7 +955,7 @@ export default function App() {
                 <button
                   type="button"
                   className="send-btn"
-                  disabled={busy || !promptText.trim()}
+                  disabled={busy || !canSend}
                   onClick={() => {
                     if (hasCodex) void sendTurn()
                     else void sendToSession()
@@ -833,6 +1029,74 @@ export default function App() {
       )}
     </Shell>
   )
+}
+
+function extractAssistantReply(raw: string): string {
+  if (!raw) return ''
+  const lines = raw.split('\n')
+  const out: string[] = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    if (isTUINoiseLine(trimmed)) continue
+    out.push(trimmed)
+  }
+  if (out.length === 0) return 'Resposta no Mac — toque Ver terminal se quiser o raw'
+  // Preferência por frases curtas de confirmação no início.
+  const human = out.filter(looksHumanReply)
+  if (human.length > 0) return human.slice(0, 4).join('\n')
+  const joined = out.slice(0, 12).join('\n')
+  if (joined.length < 30 && !looksHumanReply(joined)) return 'Resposta no Mac — toque Ver terminal se quiser o raw'
+  return joined.slice(0, 4000)
+}
+
+function isTUINoiseLine(s: string): boolean {
+  const lower = s.toLowerCase()
+  const prefixes = [
+    'thought for',
+    'user_prompt_submit',
+    'shift+tab',
+    'always-approve',
+    'hooks:',
+    'running hooks',
+    'hook output',
+    'token',
+    'model:',
+    'usage:',
+    'context:',
+    'total tokens',
+    'completion tokens',
+  ]
+  for (const prefix of prefixes) {
+    if (lower.startsWith(prefix)) return true
+  }
+  if (lower.includes('149k / 500k')) return true
+  if (lower.includes('hooks') && lower.includes('ms')) return true
+  if (/\d+\s*[km]?\s*\/\s*\d+\s*[km]?/.test(s)) return true
+  if (s.startsWith('~/.maestri') || s.includes('/.maestri/')) return true
+  if (s.startsWith('/') && s.split(' ').length === 1 && s.length < 80) return true
+  return false
+}
+
+function looksHumanReply(s: string): boolean {
+  const lower = s.toLowerCase()
+  const starters = [
+    'perfeito', 'claro', 'ok', 'tudo bem', 'entendi', 'show', 'legal',
+    'vou ', 'vamos ', 'pode ', 'farei ', 'feito', 'pronto', 'certo',
+    'sugiro ', 'recomendo ', 'aqui está', 'aqui estão', 'segue', 'anexo',
+    'ótimo', 'beleza', 'blz', 'sim', 'não', 'claro que', 'sem problemas',
+  ]
+  for (const starter of starters) {
+    if (lower.startsWith(starter)) return true
+  }
+  const words = s.split(/\s+/)
+  if (words.length > 0) {
+    const first = words[0].replace(/[,.!?]$/, '').toLowerCase()
+    const personal = ['eu', 'você', 'ele', 'ela', 'nós', 'eles', 'isso', 'esse', 'esta', 'o', 'a', 'os', 'as', 'um', 'uma', 'me', 'te', 'se', 'para', 'por']
+    if (personal.includes(first)) return true
+  }
+  if (s.endsWith('?')) return true
+  return false
 }
 
 function ApprovalModal({

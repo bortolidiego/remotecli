@@ -400,6 +400,125 @@ func formatSnapshotReply(delta string) string {
 	return delta
 }
 
+// extractAssistantReply tenta extrair o parágrafo de resposta humana de uma saída TUI.
+// Se não encontrar nada que pareça resposta, retorna "Resposta no Mac — toque Ver terminal se quiser o raw".
+func extractAssistantReply(raw string) string {
+	clean := cleanTerminalText(raw)
+	if clean == "" {
+		return "Resposta no Mac — toque Ver terminal se quiser o raw"
+	}
+
+	// Primeiro: procura por frases curtas que soam como resposta natural (ex. "Perfeito.", "Claro.")
+	paragraphs := strings.Split(clean, "\n")
+	var humanLines []string
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if isTUINoiseLine(p) {
+			continue
+		}
+		if looksHumanReply(p) {
+			humanLines = append(humanLines, p)
+		}
+	}
+	if len(humanLines) > 0 {
+		return strings.Join(humanLines, "\n")
+	}
+
+	// Fallback: remove linhas de status/hook e retorna o resto se houver algo substancial.
+	var filtered []string
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" || isTUINoiseLine(p) {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	joined := strings.Join(filtered, "\n")
+	if len(strings.Join(filtered, "")) > 20 {
+		return joined
+	}
+	return "Resposta no Mac — toque Ver terminal se quiser o raw"
+}
+
+// isTUINoiseLine detecta linhas de ruído de TUI/hooks que não devem ir pro chat.
+func isTUINoiseLine(s string) bool {
+	lower := strings.ToLower(s)
+	hookPrefixes := []string{
+		"thought for", "user_prompt_submit", "shift+tab", "always-approve",
+		"hooks:", "running hooks", "hook output", "token", "/", "~/.maestri",
+		"model:", "usage:", "context:", "total tokens", "completion tokens",
+	}
+	for _, prefix := range hookPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	if strings.Contains(lower, "149k / 500k") {
+		return true
+	}
+	if strings.Contains(lower, "hooks") && strings.Contains(lower, "ms") {
+		return true
+	}
+	// Remove status de tokens tipo "149K / 500K".
+	if tokenStatusPattern.MatchString(s) {
+		return true
+	}
+	return false
+}
+
+var tokenStatusPattern = regexp.MustCompile(`\d+\s*[km]?\s*/\s*\d+\s*[km]?`)
+
+// looksHumanReply identifica frases que provavelmente são resposta natural do agente.
+func looksHumanReply(s string) bool {
+	lower := strings.ToLower(s)
+	// Frases curtas comuns de confirmação/resposta.
+	humanStarters := []string{
+		"perfeito", "claro", "ok", "tudo bem", "entendi", "show", "legal",
+		"vou ", "vamos ", "pode ", "farei ", "feito", "pronto", "certo",
+		"sugiro ", "recomendo ", "aqui está", "aqui estão", "segue", "anexo",
+		"ótimo", "beleza", "blz", "sim", "não", "claro que", "sem problemas",
+	}
+	for _, starter := range humanStarters {
+		if strings.HasPrefix(lower, starter) {
+			return true
+		}
+	}
+	// Se começa com artigo/pronome pessoal ou pergunta, provavelmente é humano.
+	firstWord := strings.TrimRight(strings.Fields(s)[0], ",.!?")
+	personal := []string{"eu", "você", "ele", "ela", "nós", "eles", "isso", "esse", "esta", "o", "a", "os", "as", "um", "uma", "me", "te", "se", "para", "por"}
+	for _, w := range personal {
+		if strings.EqualFold(firstWord, w) {
+			return true
+		}
+	}
+	// Pergunta normalmente é humano.
+	if strings.HasSuffix(s, "?") {
+		return true
+	}
+	// Se a linha tem muitos caracteres TUI ou parece caminho/status, não é humano.
+	tuiRatio := countTUIRunes(s) / float64(len([]rune(s)))
+	if tuiRatio > 0.15 {
+		return false
+	}
+	return false
+}
+
+func countTUIRunes(s string) float64 {
+	var count int
+	for _, r := range s {
+		switch r {
+		case '─', '━', '═', '║', '│', '┃', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼',
+			'▀', '▄', '█', '▌', '▐', '░', '▒', '▓', '■', '□', '▪', '▫',
+			'►', '◄', '▲', '▼', '→', '←', '↑', '↓':
+			count++
+		}
+	}
+	return float64(count)
+}
+
 // snapshotTimestamp retorna a hora da última modificação do snapshot, se existir.
 func snapshotTimestamp(name string) string {
 	info, err := os.Stat(snapshotPath(name))

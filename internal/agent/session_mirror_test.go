@@ -126,3 +126,49 @@ func TestTerminalDelta(t *testing.T) {
 	require.Equal(t, "depois", terminalDelta("antes\nmeio", "antes\nmeio\ndepois"))
 	require.Equal(t, "novo", terminalDelta("velho", "velho\nnovo"))
 }
+
+func TestExtractAssistantReply(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "frase humana curta",
+			input:    "Perfeito.\nVou fazer isso agora.",
+			expected: "Perfeito.\nVou fazer isso agora.",
+		},
+		{
+			name:     "remove ruído de hooks",
+			input:    "hooks: user_prompt_submit\nThought for 200ms\nPerfeito.",
+			expected: "Perfeito.",
+		},
+		{
+			name:     "só ruído vira fallback",
+			input:    "hooks: user_prompt_submit\nThought for 200ms\n149K / 500K",
+			expected: "Resposta no Mac — toque Ver terminal se quiser o raw",
+		},
+		{
+			name:     "remove paths",
+			input:    "~/.maestri/config.json\nClaro, aqui está.",
+			expected: "Claro, aqui está.",
+		},
+		{
+			name:     "vazio vira fallback",
+			input:    "",
+			expected: "Resposta no Mac — toque Ver terminal se quiser o raw",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractAssistantReply(tc.input)
+			require.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestSanitizeUploadName(t *testing.T) {
+	require.Equal(t, "foto.png", sanitizeUploadName("foto.png"))
+	require.Equal(t, "relat_rio_final_.pdf", sanitizeUploadName("relatório final!.pdf"))
+	require.Equal(t, "anexo", sanitizeUploadName(""))
+}
